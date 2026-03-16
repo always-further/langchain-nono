@@ -1,0 +1,90 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "langchain-nono"
+description = "OS-enforced sandbox backend for LangChain Deep Agents using Landlock (Linux) and Seatbelt (macOS)"
+license = { text = "Apache-2.0" }
+readme = "README.md"
+authors = [{ name = "Luke Hinds", email = "lukehinds@gmail.com" }]
+keywords = ["langchain", "sandbox", "security", "landlock", "seatbelt", "nono"]
+
+classifiers = [
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Security",
+]
+
+version = "0.1.0"
+requires-python = ">=3.11,<4.0"
+dependencies = [
+    "deepagents>=0.4.10,<0.5",
+    "nono-py>=0.4.2",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["langchain_nono"]
+
+[project.urls]
+Homepage = "https://github.com/always-further/langchain-nono"
+Repository = "https://github.com/always-further/langchain-nono"
+Documentation = "https://github.com/always-further/langchain-nono"
+
+[dependency-groups]
+dev = [
+    "pytest>=7.3.0,<10.0.0",
+    "pytest-cov",
+    "pytest-socket",
+    "pytest-timeout>=2.3.1,<3.0.0",
+    "pytest-asyncio>=1.3.0",
+    "ruff>=0.13.1,<0.16.0",
+    "langchain-tests>=1.1.4",
+]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "W",
+    "F",
+    "I",
+    "B",
+    "C4",
+    "UP",
+    "ARG",
+    "SIM",
+    "D",
+]
+ignore = [
+    "E501",
+    "D100",
+    "D104",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.coverage.run]
+omit = ["tests/*"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-markers --strict-config --durations=5"
+testpaths = ["tests"]
+markers = [
+    "requires: mark tests as requiring a specific library",
+]
+asyncio_mode = "auto"
+
+[tool.ruff.lint.extend-per-file-ignores]
+"tests/**/*.py" = ["D", "S101"]
