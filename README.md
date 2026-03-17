@@ -1,10 +1,10 @@
 <div align="center">
-<img src="assets/logo.png" alt="nono logo" width="600"/>
+<img src="assets/logo.png" alt="nono logo" width="500"/>
 
 
 OS-enforced sandbox backend for [LangChain Deep Agents](https://github.com/langchain-ai/deepagents) using [nono](https://github.com/always-further/nono).
 
-Uses Landlock (Linux) and Seatbelt (macOS) to run agent commands with kernel-enforced filesystem and network restrictions. No containers, VMs, or remote APIs.
+Run Langchain DeepAgents with python native, kernel-enforced sandboxing.
 
 </div>
 

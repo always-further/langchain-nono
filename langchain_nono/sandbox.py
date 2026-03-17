@@ -8,6 +8,7 @@ command. The parent remains unsandboxed.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import platform
 import sys
@@ -93,29 +94,21 @@ class NonoSandbox(BaseSandbox):
             sys_paths.extend(_SYSTEM_PATHS_MACOS)
 
         for sys_path in sys_paths:
-            try:
+            with contextlib.suppress(FileNotFoundError):
                 self._caps.allow_path(sys_path, AccessMode.READ)
-            except FileNotFoundError:
-                pass
 
         # /dev needs read for /dev/urandom, /dev/tty etc.
         # /dev/null specifically needs write for shell redirects (2>/dev/null).
-        try:
+        with contextlib.suppress(FileNotFoundError):
             self._caps.allow_path("/dev", AccessMode.READ)
-        except FileNotFoundError:
-            pass
-        try:
+        with contextlib.suppress(FileNotFoundError):
             self._caps.allow_file("/dev/null", AccessMode.READ_WRITE)
-        except FileNotFoundError:
-            pass
 
         # Python interpreter and standard library — required by BaseSandbox
         # which shells out to `python3 -c "..."` for ls, glob, read, write, edit.
         python_prefix = os.path.realpath(sys.prefix)
-        try:
+        with contextlib.suppress(FileNotFoundError):
             self._caps.allow_path(python_prefix, AccessMode.READ)
-        except FileNotFoundError:
-            pass
 
         # Working directory gets read-write
         self._caps.allow_path(working_dir, AccessMode.READ_WRITE)
