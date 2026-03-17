@@ -106,9 +106,14 @@ class NonoSandbox(BaseSandbox):
 
         # Python interpreter and standard library — required by BaseSandbox
         # which shells out to `python3 -c "..."` for ls, glob, read, write, edit.
-        python_prefix = os.path.realpath(sys.prefix)
-        with contextlib.suppress(FileNotFoundError):
-            self._caps.allow_path(python_prefix, AccessMode.READ)
+        # In venv environments sys.prefix (venv root) and sys.base_prefix
+        # (real Python installation) differ. Both are needed: the venv
+        # has bin/python3 (often a symlink) and site-packages, while
+        # base_prefix has the actual interpreter binary and stdlib.
+        for python_path in {os.path.realpath(sys.prefix),
+                            os.path.realpath(sys.base_prefix)}:
+            with contextlib.suppress(FileNotFoundError):
+                self._caps.allow_path(python_path, AccessMode.READ)
 
         # Working directory gets read-write
         self._caps.allow_path(working_dir, AccessMode.READ_WRITE)
@@ -259,9 +264,7 @@ class NonoSandbox(BaseSandbox):
         for path in paths:
             if not path.startswith("/"):
                 responses.append(
-                    FileDownloadResponse(
-                        path=path, content=None, error="invalid_path"
-                    )
+                    FileDownloadResponse(path=path, content=None, error="invalid_path")
                 )
                 continue
             if not self._is_path_readable(path):

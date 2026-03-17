@@ -185,20 +185,26 @@ class TestNonoSandboxFileTransfer:
         assert responses[0].content is not None
         assert b"agent output" in responses[0].content
 
-    def test_upload_batch_partial_failure(self, sandbox: NonoSandbox, workdir: str) -> None:
+    def test_upload_batch_partial_failure(
+        self, sandbox: NonoSandbox, workdir: str
+    ) -> None:
         """Batch upload returns per-file results, not all-or-nothing."""
         real = os.path.realpath(workdir)
         good_path = os.path.join(real, "good.txt")
         bad_path = "/etc/evil.txt"
-        responses = sandbox.upload_files([
-            (good_path, b"good"),
-            (bad_path, b"bad"),
-        ])
+        responses = sandbox.upload_files(
+            [
+                (good_path, b"good"),
+                (bad_path, b"bad"),
+            ]
+        )
         assert len(responses) == 2
         assert responses[0].error is None
         assert responses[1].error == "permission_denied"
 
-    def test_download_batch_partial_failure(self, sandbox: NonoSandbox, workdir: str) -> None:
+    def test_download_batch_partial_failure(
+        self, sandbox: NonoSandbox, workdir: str
+    ) -> None:
         """Batch download returns per-file results, not all-or-nothing."""
         real = os.path.realpath(workdir)
         good_path = os.path.join(real, "exists.txt")
@@ -217,8 +223,10 @@ class TestNonoSandboxModeSeparation:
 
     def test_read_only_path_blocks_upload(self) -> None:
         """A read-only path cannot be written to via upload_files."""
-        with tempfile.TemporaryDirectory() as workdir, \
-             tempfile.TemporaryDirectory() as ro_dir:
+        with (
+            tempfile.TemporaryDirectory() as workdir,
+            tempfile.TemporaryDirectory() as ro_dir,
+        ):
             sandbox = NonoSandbox(
                 working_dir=workdir,
                 allow_read=[ro_dir],
@@ -230,8 +238,10 @@ class TestNonoSandboxModeSeparation:
 
     def test_write_only_path_blocks_download(self) -> None:
         """A write-only path cannot be read from via download_files."""
-        with tempfile.TemporaryDirectory() as workdir, \
-             tempfile.TemporaryDirectory() as wo_dir:
+        with (
+            tempfile.TemporaryDirectory() as workdir,
+            tempfile.TemporaryDirectory() as wo_dir,
+        ):
             # Create a file in the write-only dir
             real = os.path.realpath(wo_dir)
             path = os.path.join(real, "secret.txt")
@@ -247,8 +257,10 @@ class TestNonoSandboxModeSeparation:
 
     def test_read_only_path_allows_download(self) -> None:
         """A read-only path can be read from via download_files."""
-        with tempfile.TemporaryDirectory() as workdir, \
-             tempfile.TemporaryDirectory() as ro_dir:
+        with (
+            tempfile.TemporaryDirectory() as workdir,
+            tempfile.TemporaryDirectory() as ro_dir,
+        ):
             real = os.path.realpath(ro_dir)
             path = os.path.join(real, "readable.txt")
             with open(path, "wb") as f:
@@ -264,8 +276,10 @@ class TestNonoSandboxModeSeparation:
 
     def test_write_only_path_allows_upload(self) -> None:
         """A write-only path can be written to via upload_files."""
-        with tempfile.TemporaryDirectory() as workdir, \
-             tempfile.TemporaryDirectory() as wo_dir:
+        with (
+            tempfile.TemporaryDirectory() as workdir,
+            tempfile.TemporaryDirectory() as wo_dir,
+        ):
             real = os.path.realpath(wo_dir)
             path = os.path.join(real, "writable.txt")
 
@@ -280,8 +294,10 @@ class TestNonoSandboxModeSeparation:
 
     def test_readwrite_path_allows_both(self) -> None:
         """A read-write path permits both upload and download."""
-        with tempfile.TemporaryDirectory() as workdir, \
-             tempfile.TemporaryDirectory() as rw_dir:
+        with (
+            tempfile.TemporaryDirectory() as workdir,
+            tempfile.TemporaryDirectory() as rw_dir,
+        ):
             real = os.path.realpath(rw_dir)
             path = os.path.join(real, "both.txt")
 
