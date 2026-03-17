@@ -110,8 +110,10 @@ class NonoSandbox(BaseSandbox):
         # (real Python installation) differ. Both are needed: the venv
         # has bin/python3 (often a symlink) and site-packages, while
         # base_prefix has the actual interpreter binary and stdlib.
-        for python_path in {os.path.realpath(sys.prefix),
-                            os.path.realpath(sys.base_prefix)}:
+        for python_path in {
+            os.path.realpath(sys.prefix),
+            os.path.realpath(sys.base_prefix),
+        }:
             with contextlib.suppress(FileNotFoundError):
                 self._caps.allow_path(python_path, AccessMode.READ)
 
