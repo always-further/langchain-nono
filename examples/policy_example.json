@@ -1,0 +1,32 @@
+{
+  "meta": {
+    "version": 3,
+    "schema_version": "3.0"
+  },
+  "groups": {
+    "workspace_rw": {
+      "description": "Read-write access to the example workspace",
+      "allow": {
+        "readwrite": [
+          "/tmp/langchain-nono-demo/workspace"
+        ]
+      }
+    },
+    "reference_read": {
+      "description": "Read-only access to reference material",
+      "allow": {
+        "read": [
+          "/tmp/langchain-nono-demo/references"
+        ]
+      }
+    },
+    "secrets_deny": {
+      "description": "Explicitly deny access to secrets on platforms that support it",
+      "deny": {
+        "access": [
+          "/tmp/langchain-nono-demo/secrets"
+        ]
+      }
+    }
+  }
+}

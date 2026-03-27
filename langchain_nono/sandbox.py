@@ -20,7 +20,18 @@ from deepagents.backends.protocol import (
     FileUploadResponse,
 )
 from deepagents.backends.sandbox import BaseSandbox
-from nono_py import AccessMode, CapabilitySet, sandboxed_exec
+from nono_py import (
+    AccessMode,
+    CapabilitySet,
+    ExclusionConfig,
+    ProxyConfig,
+    SnapshotManager,
+    apply_unlink_overrides,
+    load_policy,
+    sandboxed_exec,
+    start_proxy,
+    validate_deny_overlaps,
+)
 
 # Minimal system paths required for shell command execution.
 # These are read-only and scoped to what bash/coreutils need.
@@ -55,6 +66,14 @@ class NonoSandbox(BaseSandbox):
         allow_read: Additional paths to grant read-only access.
         allow_write: Additional paths to grant write-only access.
         allow_readwrite: Additional paths to grant read-write access.
+        policy_json: Raw nono policy JSON to resolve into capabilities.
+        policy_groups: Policy group names to resolve from policy_json.
+        proxy_config: Optional network filtering proxy configuration.
+        snapshot_session_dir: Optional session directory for snapshots.
+        snapshot_tracked_paths: Optional tracked roots for snapshots.
+        snapshot_exclusion: Optional snapshot exclusion configuration.
+        snapshot_max_entries: Maximum tracked snapshot entries.
+        snapshot_max_bytes: Maximum tracked snapshot bytes.
         block_network: Whether to block all outbound network access.
         timeout: Default command timeout in seconds (must be positive).
         max_output_bytes: Maximum bytes of output to return from execute().
@@ -67,6 +86,14 @@ class NonoSandbox(BaseSandbox):
         allow_read: list[str] | None = None,
         allow_write: list[str] | None = None,
         allow_readwrite: list[str] | None = None,
+        policy_json: str | None = None,
+        policy_groups: list[str] | None = None,
+        proxy_config: ProxyConfig | None = None,
+        snapshot_session_dir: str | None = None,
+        snapshot_tracked_paths: list[str] | None = None,
+        snapshot_exclusion: ExclusionConfig | None = None,
+        snapshot_max_entries: int = 300_000,
+        snapshot_max_bytes: int = 2_147_483_648,
         block_network: bool = True,
         timeout: int = 30 * 60,
         max_output_bytes: int = _MAX_OUTPUT_BYTES,
@@ -75,11 +102,23 @@ class NonoSandbox(BaseSandbox):
         if timeout <= 0:
             msg = f"timeout must be positive, got {timeout}"
             raise ValueError(msg)
+        if policy_json is None and policy_groups:
+            msg = "policy_groups requires policy_json"
+            raise ValueError(msg)
+        if policy_json is not None and not policy_groups:
+            msg = "policy_json requires at least one policy group"
+            raise ValueError(msg)
+        if proxy_config is not None and not block_network:
+            msg = "proxy_config requires block_network=True"
+            raise ValueError(msg)
 
         self._id = str(uuid4())
         self._working_dir = os.path.realpath(working_dir)
         self._default_timeout = timeout
         self._max_output_bytes = max_output_bytes
+        self._proxy_handle = None
+        self._proxy_env: list[tuple[str, str]] | None = None
+        self._snapshot_manager = None
 
         # Track allowed paths for file transfer boundary enforcement.
         # Separate sets for read and write permissions.
@@ -132,8 +171,45 @@ class NonoSandbox(BaseSandbox):
             self._readable_paths.append(real)
             self._writable_paths.append(real)
 
+        if policy_json is not None:
+            resolved = load_policy(policy_json).resolve_groups(policy_groups, self._caps)
+            if resolved.needs_unlink_overrides:
+                apply_unlink_overrides(self._caps)
+            validate_deny_overlaps(resolved.deny_paths, self._caps)
+
+            for capability in self._caps.fs_capabilities():
+                if not str(capability.source).startswith("group"):
+                    continue
+                self._register_transfer_path(capability.resolved, capability.access)
+
         if block_network:
             self._caps.block_network()
+
+        if proxy_config is not None:
+            self._proxy_handle = start_proxy(proxy_config)
+            self._proxy_env = list(self._proxy_handle.env_vars().items()) + list(
+                self._proxy_handle.credential_env_vars().items()
+            )
+
+        if snapshot_session_dir is not None:
+            tracked_paths = snapshot_tracked_paths or [self._working_dir]
+            self._snapshot_manager = SnapshotManager(
+                session_dir=snapshot_session_dir,
+                tracked_paths=tracked_paths,
+                exclusion=snapshot_exclusion,
+                max_entries=snapshot_max_entries,
+                max_bytes=snapshot_max_bytes,
+            )
+
+    def _register_transfer_path(self, path: str, access: AccessMode) -> None:
+        """Track allowed paths for upload/download policy enforcement."""
+        real = os.path.realpath(path)
+        if access in {AccessMode.READ, AccessMode.READ_WRITE}:
+            if real not in self._readable_paths:
+                self._readable_paths.append(real)
+        if access in {AccessMode.WRITE, AccessMode.READ_WRITE}:
+            if real not in self._writable_paths:
+                self._writable_paths.append(real)
 
     def _is_path_readable(self, path: str) -> bool:
         """Check if a path falls within a readable directory."""
@@ -194,6 +270,7 @@ class NonoSandbox(BaseSandbox):
             command=["bash", "-c", command],
             cwd=self._working_dir,
             timeout_secs=float(effective_timeout),
+            env=self._proxy_env,
         )
 
         output = result.stdout.decode("utf-8", errors="replace")
@@ -246,6 +323,59 @@ class NonoSandbox(BaseSandbox):
                     FileUploadResponse(path=path, error="permission_denied")
                 )
         return responses
+
+    def drain_network_audit_events(self) -> list[dict[str, object]]:
+        """Drain audit events from the configured proxy."""
+        if self._proxy_handle is None:
+            return []
+        return self._proxy_handle.drain_audit_events()
+
+    def shutdown_proxy(self) -> None:
+        """Shut down the configured proxy if one is running."""
+        if self._proxy_handle is None:
+            return
+        self._proxy_handle.shutdown()
+        self._proxy_handle = None
+        self._proxy_env = None
+
+    def create_snapshot_baseline(self):
+        """Create a baseline snapshot for the configured session."""
+        if self._snapshot_manager is None:
+            msg = "snapshot support is not configured"
+            raise RuntimeError(msg)
+        return self._snapshot_manager.create_baseline()
+
+    def create_snapshot_incremental(self):
+        """Create an incremental snapshot for the configured session."""
+        if self._snapshot_manager is None:
+            msg = "snapshot support is not configured"
+            raise RuntimeError(msg)
+        return self._snapshot_manager.create_incremental()
+
+    def restore_snapshot(self, snapshot_number: int):
+        """Restore tracked files to a previous snapshot."""
+        if self._snapshot_manager is None:
+            msg = "snapshot support is not configured"
+            raise RuntimeError(msg)
+        return self._snapshot_manager.restore_to(snapshot_number)
+
+    def load_snapshot_manifest(self, snapshot_number: int):
+        """Load a snapshot manifest by number."""
+        if self._snapshot_manager is None:
+            msg = "snapshot support is not configured"
+            raise RuntimeError(msg)
+        return self._snapshot_manager.load_manifest(snapshot_number)
+
+    def snapshot_count(self) -> int:
+        """Return the number of snapshots recorded for this sandbox."""
+        if self._snapshot_manager is None:
+            return 0
+        return self._snapshot_manager.snapshot_count()
+
+    def __del__(self) -> None:
+        """Best-effort cleanup for background proxy resources."""
+        with contextlib.suppress(Exception):
+            self.shutdown_proxy()
 
     def download_files(
         self,

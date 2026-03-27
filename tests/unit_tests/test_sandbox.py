@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
+from types import SimpleNamespace
 
 import pytest
 
 from langchain_nono import NonoSandbox
+from nono_py import ProxyConfig
 
 
 @pytest.fixture
@@ -47,6 +50,34 @@ class TestNonoSandboxCreation:
         """Zero timeout is rejected at construction."""
         with pytest.raises(ValueError, match="timeout must be positive"):
             NonoSandbox(working_dir=workdir, timeout=0)
+
+    def test_policy_groups_require_policy_json(self, workdir: str) -> None:
+        """Policy group names cannot be used without a policy document."""
+        with pytest.raises(ValueError, match="policy_groups requires policy_json"):
+            NonoSandbox(
+                working_dir=workdir,
+                policy_groups=["tmp_read"],
+            )
+
+    def test_policy_json_requires_groups(self, workdir: str) -> None:
+        """Policy documents must specify at least one group to resolve."""
+        with pytest.raises(
+            ValueError,
+            match="policy_json requires at least one policy group",
+        ):
+            NonoSandbox(
+                working_dir=workdir,
+                policy_json=json.dumps({"groups": {}}),
+            )
+
+    def test_proxy_config_requires_block_network(self, workdir: str) -> None:
+        """Proxy filtering must run with direct network blocked."""
+        with pytest.raises(ValueError, match="proxy_config requires block_network=True"):
+            NonoSandbox(
+                working_dir=workdir,
+                proxy_config=ProxyConfig(allowed_hosts=["example.com"]),
+                block_network=False,
+            )
 
 
 class TestNonoSandboxExecute:
@@ -96,6 +127,57 @@ class TestNonoSandboxExecute:
             result = sandbox.execute(f"echo {i}")
             assert result.exit_code == 0
             assert str(i) in result.output
+
+    def test_proxy_env_vars_are_injected(
+        self, monkeypatch: pytest.MonkeyPatch, workdir: str
+    ) -> None:
+        """Proxy and credential env vars are passed to sandboxed_exec."""
+        captured: dict[str, object] = {}
+
+        class FakeProxyHandle:
+            def env_vars(self) -> dict[str, str]:
+                return {"HTTP_PROXY": "http://127.0.0.1:1234"}
+
+            def credential_env_vars(self) -> dict[str, str]:
+                return {"OPENAI_API_KEY": "PHANTOM_TOKEN"}
+
+            def drain_audit_events(self) -> list[dict[str, object]]:
+                return [{"decision": "allow", "target": "example.com"}]
+
+            def shutdown(self) -> None:
+                captured["shutdown"] = True
+
+        def fake_start_proxy(config: ProxyConfig) -> FakeProxyHandle:
+            captured["proxy_config"] = config
+            return FakeProxyHandle()
+
+        def fake_sandboxed_exec(**kwargs):
+            captured["env"] = kwargs["env"]
+            return SimpleNamespace(stdout=b"ok\n", stderr=b"", exit_code=0)
+
+        monkeypatch.setattr("langchain_nono.sandbox.start_proxy", fake_start_proxy)
+        monkeypatch.setattr(
+            "langchain_nono.sandbox.sandboxed_exec",
+            fake_sandboxed_exec,
+        )
+
+        sandbox = NonoSandbox(
+            working_dir=workdir,
+            proxy_config=ProxyConfig(allowed_hosts=["example.com"]),
+        )
+
+        result = sandbox.execute("echo ok")
+
+        assert result.exit_code == 0
+        assert captured["env"] == [
+            ("HTTP_PROXY", "http://127.0.0.1:1234"),
+            ("OPENAI_API_KEY", "PHANTOM_TOKEN"),
+        ]
+        assert sandbox.drain_network_audit_events() == [
+            {"decision": "allow", "target": "example.com"}
+        ]
+        sandbox.shutdown_proxy()
+        assert captured["shutdown"] is True
 
 
 class TestNonoSandboxFileTransfer:
@@ -311,6 +393,133 @@ class TestNonoSandboxModeSeparation:
             download = sandbox.download_files([path])
             assert download[0].error is None
             assert download[0].content == b"both"
+
+
+class TestNonoSandboxSnapshots:
+    """Tests for snapshot and rollback delegation."""
+
+    def test_snapshot_methods_delegate(
+        self, monkeypatch: pytest.MonkeyPatch, workdir: str
+    ) -> None:
+        """Snapshot helpers should call through to SnapshotManager."""
+        captured: dict[str, object] = {}
+
+        class FakeSnapshotManager:
+            def __init__(
+                self,
+                *,
+                session_dir: str,
+                tracked_paths: list[str],
+                exclusion,
+                max_entries: int,
+                max_bytes: int,
+            ) -> None:
+                captured["session_dir"] = session_dir
+                captured["tracked_paths"] = tracked_paths
+                captured["max_entries"] = max_entries
+                captured["max_bytes"] = max_bytes
+
+            def create_baseline(self):
+                return "baseline"
+
+            def create_incremental(self):
+                return ("incremental", ["change"])
+
+            def restore_to(self, snapshot_number: int):
+                return [snapshot_number]
+
+            def load_manifest(self, snapshot_number: int):
+                return {"number": snapshot_number}
+
+            def snapshot_count(self) -> int:
+                return 2
+
+        monkeypatch.setattr(
+            "langchain_nono.sandbox.SnapshotManager",
+            FakeSnapshotManager,
+        )
+
+        sandbox = NonoSandbox(
+            working_dir=workdir,
+            snapshot_session_dir=os.path.join(workdir, ".nono-snapshots"),
+        )
+
+        assert captured["tracked_paths"] == [os.path.realpath(workdir)]
+        assert sandbox.create_snapshot_baseline() == "baseline"
+        assert sandbox.create_snapshot_incremental() == ("incremental", ["change"])
+        assert sandbox.restore_snapshot(0) == [0]
+        assert sandbox.load_snapshot_manifest(1) == {"number": 1}
+        assert sandbox.snapshot_count() == 2
+
+    def test_snapshot_methods_require_configuration(self, workdir: str) -> None:
+        """Snapshot helpers should fail fast when snapshots are disabled."""
+        sandbox = NonoSandbox(working_dir=workdir)
+
+        with pytest.raises(RuntimeError, match="snapshot support is not configured"):
+            sandbox.create_snapshot_baseline()
+
+
+class TestNonoSandboxPolicyLoading:
+    """Tests for policy-backed capability loading."""
+
+    def test_policy_read_group_allows_download(self) -> None:
+        """Policy-derived read grants should be honored by file downloads."""
+        with (
+            tempfile.TemporaryDirectory() as workdir,
+            tempfile.TemporaryDirectory() as policy_dir,
+        ):
+            real = os.path.realpath(policy_dir)
+            path = os.path.join(real, "policy.txt")
+            with open(path, "wb") as f:
+                f.write(b"policy data")
+
+            sandbox = NonoSandbox(
+                working_dir=workdir,
+                policy_json=json.dumps(
+                    {
+                        "groups": {
+                            "policy_read": {
+                                "description": "Read from policy dir",
+                                "allow": {"read": [real]},
+                            }
+                        }
+                    }
+                ),
+                policy_groups=["policy_read"],
+            )
+
+            responses = sandbox.download_files([path])
+            assert responses[0].error is None
+            assert responses[0].content == b"policy data"
+
+    def test_policy_readwrite_group_allows_upload(self) -> None:
+        """Policy-derived read-write grants should be honored by uploads."""
+        with (
+            tempfile.TemporaryDirectory() as workdir,
+            tempfile.TemporaryDirectory() as policy_dir,
+        ):
+            real = os.path.realpath(policy_dir)
+            path = os.path.join(real, "uploaded.txt")
+
+            sandbox = NonoSandbox(
+                working_dir=workdir,
+                policy_json=json.dumps(
+                    {
+                        "groups": {
+                            "policy_rw": {
+                                "description": "Read-write policy dir",
+                                "allow": {"readwrite": [real]},
+                            }
+                        }
+                    }
+                ),
+                policy_groups=["policy_rw"],
+            )
+
+            responses = sandbox.upload_files([(path, b"policy write")])
+            assert responses[0].error is None
+            with open(path, "rb") as f:
+                assert f.read() == b"policy write"
 
 
 class TestNonoSandboxOutputTruncation:
