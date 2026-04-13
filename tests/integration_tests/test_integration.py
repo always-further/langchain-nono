@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-from langchain_tests.integration_tests import (  # ty:ignore[unresolved-import]
+from langchain_tests.integration_tests import (
     SandboxIntegrationTests,
 )
 
@@ -14,7 +14,9 @@ from langchain_nono import NonoSandbox
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from deepagents.backends.protocol import SandboxBackendProtocol  # ty:ignore[unresolved-import]
+    from deepagents.backends.protocol import (
+        SandboxBackendProtocol,
+    )
 
 
 class TestNonoSandboxStandard(SandboxIntegrationTests):
