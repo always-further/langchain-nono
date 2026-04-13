@@ -412,7 +412,7 @@ class TestNonoSandboxSnapshots:
                 *,
                 session_dir: str,
                 tracked_paths: list[str],
-                exclusion,
+                exclusion,  # noqa: ARG002
                 max_entries: int,
                 max_bytes: int,
             ) -> None:
