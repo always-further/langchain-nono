@@ -53,7 +53,7 @@ def main() -> None:
     print("Allowed download from references:")
     print(f"  path: {allowed_download.path}")
     print(f"  result: {describe_file_transfer_error(allowed_download.error)}")
-    print(f"  content: {allowed_download.content.decode().strip()}")
+    print("  content: {allowed_download.content.decode().strip()}")
     print()
 
     print("Denied download from secrets:")

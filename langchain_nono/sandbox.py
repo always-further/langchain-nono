@@ -25,6 +25,7 @@ from nono_py import (
     CapabilitySet,
     ExclusionConfig,
     ProxyConfig,
+    SessionMetadata,
     SnapshotManager,
     apply_unlink_overrides,
     load_policy,
@@ -172,7 +173,9 @@ class NonoSandbox(BaseSandbox):
             self._writable_paths.append(real)
 
         if policy_json is not None:
-            resolved = load_policy(policy_json).resolve_groups(policy_groups, self._caps)
+            resolved = load_policy(policy_json).resolve_groups(
+                policy_groups, self._caps
+            )
             if resolved.needs_unlink_overrides:
                 apply_unlink_overrides(self._caps)
             validate_deny_overlaps(resolved.deny_paths, self._caps)
@@ -267,7 +270,7 @@ class NonoSandbox(BaseSandbox):
 
         result = sandboxed_exec(
             caps=self._caps,
-            command=["bash", "-c", command],
+            command=["/bin/bash", "-c", command],
             cwd=self._working_dir,
             timeout_secs=float(effective_timeout),
             env=self._proxy_env,
@@ -359,6 +362,13 @@ class NonoSandbox(BaseSandbox):
             raise RuntimeError(msg)
         return self._snapshot_manager.restore_to(snapshot_number)
 
+    def compute_restore_diff(self, snapshot_number: int):
+        """Dry-run showing what changes a restore would apply."""
+        if self._snapshot_manager is None:
+            msg = "snapshot support is not configured"
+            raise RuntimeError(msg)
+        return self._snapshot_manager.compute_restore_diff(snapshot_number)
+
     def load_snapshot_manifest(self, snapshot_number: int):
         """Load a snapshot manifest by number."""
         if self._snapshot_manager is None:
@@ -366,11 +376,33 @@ class NonoSandbox(BaseSandbox):
             raise RuntimeError(msg)
         return self._snapshot_manager.load_manifest(snapshot_number)
 
+    def save_session_metadata(self, meta: SessionMetadata) -> None:
+        """Save session metadata to the snapshot session directory."""
+        if self._snapshot_manager is None:
+            msg = "snapshot support is not configured"
+            raise RuntimeError(msg)
+        self._snapshot_manager.save_session_metadata(meta)
+
+    @staticmethod
+    def load_session_metadata(session_dir: str):
+        """Load session metadata from a session directory."""
+        return SnapshotManager.load_session_metadata(session_dir)
+
     def snapshot_count(self) -> int:
         """Return the number of snapshots recorded for this sandbox."""
         if self._snapshot_manager is None:
             return 0
         return self._snapshot_manager.snapshot_count()
+
+    @staticmethod
+    def resolve_proxy_from_policy(
+        policy_json: str, groups: list[str]
+    ) -> ProxyConfig | None:
+        """Resolve a ProxyConfig from policy JSON network groups.
+
+        Returns None when the requested groups do not define proxy rules.
+        """
+        return load_policy(policy_json).resolve_proxy_config(groups)
 
     def __del__(self) -> None:
         """Best-effort cleanup for background proxy resources."""

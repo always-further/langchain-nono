@@ -8,9 +8,9 @@ import tempfile
 from types import SimpleNamespace
 
 import pytest
+from nono_py import ProxyConfig
 
 from langchain_nono import NonoSandbox
-from nono_py import ProxyConfig
 
 
 @pytest.fixture
@@ -72,7 +72,9 @@ class TestNonoSandboxCreation:
 
     def test_proxy_config_requires_block_network(self, workdir: str) -> None:
         """Proxy filtering must run with direct network blocked."""
-        with pytest.raises(ValueError, match="proxy_config requires block_network=True"):
+        with pytest.raises(
+            ValueError, match="proxy_config requires block_network=True"
+        ):
             NonoSandbox(
                 working_dir=workdir,
                 proxy_config=ProxyConfig(allowed_hosts=["example.com"]),
@@ -428,11 +430,21 @@ class TestNonoSandboxSnapshots:
             def restore_to(self, snapshot_number: int):
                 return [snapshot_number]
 
+            def compute_restore_diff(self, snapshot_number: int):
+                return [f"diff-{snapshot_number}"]
+
             def load_manifest(self, snapshot_number: int):
                 return {"number": snapshot_number}
 
+            def save_session_metadata(self, meta):
+                captured["meta"] = meta
+
             def snapshot_count(self) -> int:
                 return 2
+
+            @staticmethod
+            def load_session_metadata(session_dir: str):
+                return f"metadata-from-{session_dir}"
 
         monkeypatch.setattr(
             "langchain_nono.sandbox.SnapshotManager",
@@ -448,8 +460,28 @@ class TestNonoSandboxSnapshots:
         assert sandbox.create_snapshot_baseline() == "baseline"
         assert sandbox.create_snapshot_incremental() == ("incremental", ["change"])
         assert sandbox.restore_snapshot(0) == [0]
+        assert sandbox.compute_restore_diff(0) == ["diff-0"]
         assert sandbox.load_snapshot_manifest(1) == {"number": 1}
         assert sandbox.snapshot_count() == 2
+
+        sandbox.save_session_metadata("test-meta")
+        assert captured["meta"] == "test-meta"
+
+    def test_load_session_metadata_delegates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Static load_session_metadata delegates to SnapshotManager."""
+
+        def fake_load(session_dir: str):
+            return f"loaded-from-{session_dir}"
+
+        monkeypatch.setattr(
+            "langchain_nono.sandbox.SnapshotManager.load_session_metadata",
+            staticmethod(fake_load),
+        )
+
+        result = NonoSandbox.load_session_metadata("/tmp/test-session")
+        assert result == "loaded-from-/tmp/test-session"
 
     def test_snapshot_methods_require_configuration(self, workdir: str) -> None:
         """Snapshot helpers should fail fast when snapshots are disabled."""
@@ -457,6 +489,10 @@ class TestNonoSandboxSnapshots:
 
         with pytest.raises(RuntimeError, match="snapshot support is not configured"):
             sandbox.create_snapshot_baseline()
+        with pytest.raises(RuntimeError, match="snapshot support is not configured"):
+            sandbox.compute_restore_diff(0)
+        with pytest.raises(RuntimeError, match="snapshot support is not configured"):
+            sandbox.save_session_metadata("meta")
 
 
 class TestNonoSandboxPolicyLoading:
@@ -520,6 +556,45 @@ class TestNonoSandboxPolicyLoading:
             assert responses[0].error is None
             with open(path, "rb") as f:
                 assert f.read() == b"policy write"
+
+
+class TestNonoSandboxPolicyProxy:
+    """Tests for policy-based proxy config resolution."""
+
+    def test_resolve_proxy_from_policy_returns_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """resolve_proxy_from_policy returns a ProxyConfig from policy groups."""
+        sentinel = ProxyConfig(allowed_hosts=["example.com"])
+
+        class FakePolicy:
+            def resolve_proxy_config(self, _groups: list[str]):
+                return sentinel
+
+        monkeypatch.setattr(
+            "langchain_nono.sandbox.load_policy",
+            lambda _json: FakePolicy(),
+        )
+
+        result = NonoSandbox.resolve_proxy_from_policy("{}", ["proxy_group"])
+        assert result is sentinel
+
+    def test_resolve_proxy_from_policy_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """resolve_proxy_from_policy returns None for non-proxy groups."""
+
+        class FakePolicy:
+            def resolve_proxy_config(self, _groups: list[str]):
+                return None
+
+        monkeypatch.setattr(
+            "langchain_nono.sandbox.load_policy",
+            lambda _json: FakePolicy(),
+        )
+
+        result = NonoSandbox.resolve_proxy_from_policy("{}", ["no_proxy"])
+        assert result is None
 
 
 class TestNonoSandboxOutputTruncation:

@@ -10,11 +10,14 @@ from pathlib import Path
 from langchain_nono import NonoSandbox, describe_execute_failure
 
 
-def explain_exec_result(label: str, exit_code: int, output: str) -> None:
+def explain_exec_result(label: str, exit_code: int | None, output: str) -> None:
     """Print a clearer explanation for sandbox execution results."""
     print(label)
     print(f"  exit_code: {exit_code}")
     cleaned = output.strip()
+    if exit_code is None:
+        print(f"  raw_output: {cleaned or '<no output>'}")
+        return
     message = describe_execute_failure(exit_code, output)
     if message is not None:
         print(f"  sandbox_message: {message}")
