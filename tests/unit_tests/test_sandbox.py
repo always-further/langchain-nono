@@ -5,12 +5,16 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from typing import TYPE_CHECKING
 from types import SimpleNamespace
 
 import pytest
-from nono_py import ProxyConfig
+from nono_py import ProxyConfig, SessionMetadata
 
 from langchain_nono import NonoSandbox
+
+if TYPE_CHECKING:
+    from nono_py._nono_py import NetworkAuditEvent
 
 
 @pytest.fixture
@@ -143,7 +147,7 @@ class TestNonoSandboxExecute:
             def credential_env_vars(self) -> dict[str, str]:
                 return {"OPENAI_API_KEY": "PHANTOM_TOKEN"}
 
-            def drain_audit_events(self) -> list[dict[str, object]]:
+            def drain_audit_events(self) -> list[NetworkAuditEvent]:
                 return [{"decision": "allow", "target": "example.com"}]
 
             def shutdown(self) -> None:
@@ -412,7 +416,7 @@ class TestNonoSandboxSnapshots:
                 *,
                 session_dir: str,
                 tracked_paths: list[str],
-                exclusion,
+                _exclusion,
                 max_entries: int,
                 max_bytes: int,
             ) -> None:
@@ -436,7 +440,7 @@ class TestNonoSandboxSnapshots:
             def load_manifest(self, snapshot_number: int):
                 return {"number": snapshot_number}
 
-            def save_session_metadata(self, meta):
+            def save_session_metadata(self, meta: SessionMetadata) -> None:
                 captured["meta"] = meta
 
             def snapshot_count(self) -> int:
@@ -464,8 +468,13 @@ class TestNonoSandboxSnapshots:
         assert sandbox.load_snapshot_manifest(1) == {"number": 1}
         assert sandbox.snapshot_count() == 2
 
-        sandbox.save_session_metadata("test-meta")
-        assert captured["meta"] == "test-meta"
+        meta = SessionMetadata(
+            session_id="test-session",
+            command=["echo", "ok"],
+            tracked_paths=[os.path.realpath(workdir)],
+        )
+        sandbox.save_session_metadata(meta)
+        assert captured["meta"] is meta
 
     def test_load_session_metadata_delegates(
         self, monkeypatch: pytest.MonkeyPatch
@@ -491,8 +500,13 @@ class TestNonoSandboxSnapshots:
             sandbox.create_snapshot_baseline()
         with pytest.raises(RuntimeError, match="snapshot support is not configured"):
             sandbox.compute_restore_diff(0)
+        meta = SessionMetadata(
+            session_id="test-session",
+            command=["echo", "ok"],
+            tracked_paths=[os.path.realpath(workdir)],
+        )
         with pytest.raises(RuntimeError, match="snapshot support is not configured"):
-            sandbox.save_session_metadata("meta")
+            sandbox.save_session_metadata(meta)
 
 
 class TestNonoSandboxPolicyLoading:

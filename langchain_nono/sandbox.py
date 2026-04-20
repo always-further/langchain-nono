@@ -12,6 +12,7 @@ import contextlib
 import os
 import platform
 import sys
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from deepagents.backends.protocol import (
@@ -33,6 +34,9 @@ from nono_py import (
     start_proxy,
     validate_deny_overlaps,
 )
+
+if TYPE_CHECKING:
+    from nono_py._nono_py import NetworkAuditEvent
 
 # Minimal system paths required for shell command execution.
 # These are read-only and scoped to what bash/coreutils need.
@@ -174,7 +178,7 @@ class NonoSandbox(BaseSandbox):
 
         if policy_json is not None:
             resolved = load_policy(policy_json).resolve_groups(
-                policy_groups, self._caps
+                policy_groups or [], self._caps
             )
             if resolved.needs_unlink_overrides:
                 apply_unlink_overrides(self._caps)
@@ -207,12 +211,10 @@ class NonoSandbox(BaseSandbox):
     def _register_transfer_path(self, path: str, access: AccessMode) -> None:
         """Track allowed paths for upload/download policy enforcement."""
         real = os.path.realpath(path)
-        if access in {AccessMode.READ, AccessMode.READ_WRITE}:
-            if real not in self._readable_paths:
-                self._readable_paths.append(real)
-        if access in {AccessMode.WRITE, AccessMode.READ_WRITE}:
-            if real not in self._writable_paths:
-                self._writable_paths.append(real)
+        if access in {AccessMode.READ, AccessMode.READ_WRITE} and real not in self._readable_paths:
+            self._readable_paths.append(real)
+        if access in {AccessMode.WRITE, AccessMode.READ_WRITE} and real not in self._writable_paths:
+            self._writable_paths.append(real)
 
     def _is_path_readable(self, path: str) -> bool:
         """Check if a path falls within a readable directory."""
@@ -327,7 +329,7 @@ class NonoSandbox(BaseSandbox):
                 )
         return responses
 
-    def drain_network_audit_events(self) -> list[dict[str, object]]:
+    def drain_network_audit_events(self) -> list[NetworkAuditEvent]:
         """Drain audit events from the configured proxy."""
         if self._proxy_handle is None:
             return []
