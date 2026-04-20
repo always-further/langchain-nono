@@ -29,7 +29,9 @@ class SandboxIntegrationTests:
         self, sandbox: SandboxBackendProtocol
     ) -> SandboxBackendProtocol:
         """Provide the sandbox backend under test."""
-        sandbox.execute("rm -rf /tmp/test_sandbox_ops && mkdir -p /tmp/test_sandbox_ops")
+        sandbox.execute(
+            "rm -rf /tmp/test_sandbox_ops && mkdir -p /tmp/test_sandbox_ops"
+        )
         return sandbox
 
     @abstractmethod
@@ -47,7 +49,9 @@ class SandboxIntegrationTests:
         """Reset the shared sandbox test directory before each test."""
         if not self.has_sync:
             pytest.skip("Sync tests not supported.")
-        sandbox_backend.execute("rm -rf /tmp/test_sandbox_ops && mkdir -p /tmp/test_sandbox_ops")
+        sandbox_backend.execute(
+            "rm -rf /tmp/test_sandbox_ops && mkdir -p /tmp/test_sandbox_ops"
+        )
 
     def test_write_new_file(self, sandbox_backend: SandboxBackendProtocol) -> None:
         """Write a new file and verify it can be read back via command execution."""
@@ -299,7 +303,9 @@ class SandboxIntegrationTests:
             }
             return
         download = sandbox_backend.download_files([path])
-        assert download == [FileDownloadResponse(path=path, content=content, error=None)]
+        assert download == [
+            FileDownloadResponse(path=path, content=content, error=None)
+        ]
 
     def test_upload_relative_path_returns_invalid_path(
         self, sandbox_backend: SandboxBackendProtocol
@@ -332,5 +338,7 @@ class TestNonoSandboxStandard(SandboxIntegrationTests):
             probe.exit_code != 0
             and "sandbox initialization failed" in probe.output.lower()
         ):
-            pytest.skip(f"sandbox backend unavailable in this environment: {probe.output}")
+            pytest.skip(
+                f"sandbox backend unavailable in this environment: {probe.output}"
+            )
         yield backend
