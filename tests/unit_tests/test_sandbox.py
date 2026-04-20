@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from typing import TYPE_CHECKING
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
 from nono_py import ProxyConfig, SessionMetadata
@@ -416,12 +416,13 @@ class TestNonoSandboxSnapshots:
                 *,
                 session_dir: str,
                 tracked_paths: list[str],
-                _exclusion,
+                exclusion,
                 max_entries: int,
                 max_bytes: int,
             ) -> None:
                 captured["session_dir"] = session_dir
                 captured["tracked_paths"] = tracked_paths
+                captured["exclusion"] = exclusion
                 captured["max_entries"] = max_entries
                 captured["max_bytes"] = max_bytes
 

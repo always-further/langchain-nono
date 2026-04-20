@@ -211,9 +211,15 @@ class NonoSandbox(BaseSandbox):
     def _register_transfer_path(self, path: str, access: AccessMode) -> None:
         """Track allowed paths for upload/download policy enforcement."""
         real = os.path.realpath(path)
-        if access in {AccessMode.READ, AccessMode.READ_WRITE} and real not in self._readable_paths:
+        if (
+            access in {AccessMode.READ, AccessMode.READ_WRITE}
+            and real not in self._readable_paths
+        ):
             self._readable_paths.append(real)
-        if access in {AccessMode.WRITE, AccessMode.READ_WRITE} and real not in self._writable_paths:
+        if (
+            access in {AccessMode.WRITE, AccessMode.READ_WRITE}
+            and real not in self._writable_paths
+        ):
             self._writable_paths.append(real)
 
     def _is_path_readable(self, path: str) -> bool:
