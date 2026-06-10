@@ -73,8 +73,12 @@ class SandboxIntegrationTests:
         content = "Line 1\nLine 2\nLine 3"
         sandbox_backend.write(test_path, content)
         result = sandbox_backend.read(test_path)
-        assert "Error:" not in result
-        assert all(line in result for line in ("Line 1", "Line 2", "Line 3"))
+        assert result.error is None
+        assert result.file_data is not None
+        assert all(
+            line in result.file_data["content"]
+            for line in ("Line 1", "Line 2", "Line 3")
+        )
 
     def test_edit_single_occurrence(
         self, sandbox_backend: SandboxBackendProtocol
@@ -88,37 +92,47 @@ class SandboxIntegrationTests:
         result = sandbox_backend.edit(test_path, "Goodbye", "Farewell")
         assert result.error is None
         assert result.occurrences == 1
-        file_content = sandbox_backend.read(test_path)
+        read_result = sandbox_backend.read(test_path)
+        assert read_result.error is None
+        assert read_result.file_data is not None
+        file_content = read_result.file_data["content"]
         assert "Farewell world" in file_content
         assert "Goodbye" not in file_content
 
-    def test_ls_info_lists_files(self, sandbox_backend: SandboxBackendProtocol) -> None:
-        """Create files and verify ls_info() lists them."""
+    def test_ls_lists_files(self, sandbox_backend: SandboxBackendProtocol) -> None:
+        """Create files and verify ls() lists them."""
         if not self.has_sync:
             pytest.skip("Sync tests not supported.")
         sandbox_backend.write("/tmp/test_sandbox_ops/a.txt", "a")
         sandbox_backend.write("/tmp/test_sandbox_ops/b.txt", "b")
-        info = sandbox_backend.ls_info("/tmp/test_sandbox_ops")
-        paths = sorted(i["path"] for i in info)
+        result = sandbox_backend.ls("/tmp/test_sandbox_ops")
+        assert result.error is None
+        assert result.entries is not None
+        paths = sorted(i["path"] for i in result.entries)
         assert "/tmp/test_sandbox_ops/a.txt" in paths
         assert "/tmp/test_sandbox_ops/b.txt" in paths
 
-    def test_glob_info(self, sandbox_backend: SandboxBackendProtocol) -> None:
-        """Create files and verify glob_info() returns expected matches."""
+    def test_glob(self, sandbox_backend: SandboxBackendProtocol) -> None:
+        """Create files and verify glob() returns expected matches."""
         if not self.has_sync:
             pytest.skip("Sync tests not supported.")
         sandbox_backend.write("/tmp/test_sandbox_ops/x.py", "print('x')")
         sandbox_backend.write("/tmp/test_sandbox_ops/y.txt", "y")
-        matches = sandbox_backend.glob_info("*.py", path="/tmp/test_sandbox_ops")
+        result = sandbox_backend.glob("*.py", path="/tmp/test_sandbox_ops")
+        assert result.error is None
+        assert result.matches is not None
+        matches = result.matches
         assert [m["path"] for m in matches] == ["x.py"]
 
-    def test_grep_raw_literal(self, sandbox_backend: SandboxBackendProtocol) -> None:
-        """Verify grep_raw() performs literal matching on special characters."""
+    def test_grep_literal(self, sandbox_backend: SandboxBackendProtocol) -> None:
+        """Verify grep() performs literal matching on special characters."""
         if not self.has_sync:
             pytest.skip("Sync tests not supported.")
         sandbox_backend.write("/tmp/test_sandbox_ops/grep.txt", "a (b)\nstr | int\n")
-        matches = sandbox_backend.grep_raw("str | int", path="/tmp/test_sandbox_ops")
-        assert isinstance(matches, list)
+        result = sandbox_backend.grep("str | int", path="/tmp/test_sandbox_ops")
+        assert result.error is None
+        assert result.matches is not None
+        matches = result.matches
         assert matches[0]["path"].endswith("/grep.txt")
         assert matches[0]["text"].strip() == "str | int"
 

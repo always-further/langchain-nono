@@ -109,9 +109,13 @@ proxy_config = NonoSandbox.resolve_proxy_from_policy(
 
 ## Credential Injection
 
-The proxy can transparently swap phantom tokens for real API credentials,
-so sandboxed code never sees real keys. Real credentials are loaded from
-the host's OS keyring; only phantom tokens enter the sandbox.
+The proxy can inject real API credentials on outbound requests, so
+sandboxed code never sees real keys. Real credentials are loaded from
+the host's OS keyring; the child only receives proxy routing variables.
+
+When proxy mode is enabled, `langchain-nono` uses nono-py's proxy-only
+network mode so sandboxed code can connect only to the local proxy port;
+all direct outbound network access remains blocked.
 
 ```python
 from langchain_nono import InjectMode, NonoSandbox, ProxyConfig, RouteConfig
@@ -134,9 +138,9 @@ sandbox = NonoSandbox(
     block_network=True,
 )
 
-# The child sees OPENAI_API_KEY=<phantom> and OPENAI_BASE_URL=http://127.0.0.1:<port>/openai
-# The proxy swaps the phantom token for the real key on outbound requests.
-result = sandbox.execute("curl $OPENAI_BASE_URL/v1/models -H 'Authorization: Bearer $OPENAI_API_KEY'")
+# The child sees OPENAI_API_KEY unset and OPENAI_BASE_URL=http://127.0.0.1:<port>/openai
+# The proxy injects the real key on outbound requests.
+result = sandbox.execute("curl $OPENAI_BASE_URL/v1/models")
 ```
 
 Injection modes: `HEADER`, `QUERY_PARAM`, `BASIC_AUTH`, `URL_PATH`.
@@ -207,7 +211,7 @@ Proxy basics -- starting a proxy, running commands, draining audit events:
 python examples/04_proxy_basics.py
 ```
 
-API key protection via proxy credential injection with phantom token swapping:
+API key protection via proxy credential injection without exposing the API key:
 
 ```bash
 python examples/05_credential_injection.py

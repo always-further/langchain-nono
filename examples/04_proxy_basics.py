@@ -31,7 +31,7 @@ def main() -> None:
             # Allowed: example.com is in the allowlist
             print("2. Attempting request to example.com (allowed)")
             allowed = sandbox.execute(
-                "curl -sf -o /dev/null -w '%{http_code}' http://example.com 2>&1 || true"
+                "curl -sf -o /dev/null -w '%{http_code}' https://example.com 2>&1 || true"
             )
             print(f"   exit_code: {allowed.exit_code}")
             print(f"   output: {allowed.output.strip()}\n")
@@ -39,7 +39,7 @@ def main() -> None:
             # Blocked: evil.com is not in the allowlist
             print("3. Attempting request to evil.com (blocked)")
             blocked = sandbox.execute(
-                "curl -sf -o /dev/null -w '%{http_code}' http://evil.com 2>&1 || true"
+                "curl -sf -o /dev/null -w '%{http_code}' https://evil.com 2>&1 || true"
             )
             print(f"   exit_code: {blocked.exit_code}")
             print(f"   output: {blocked.output.strip()}\n")

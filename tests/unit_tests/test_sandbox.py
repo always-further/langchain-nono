@@ -4,17 +4,130 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
+import subprocess
 import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 import pytest
-from nono_py import ProxyConfig, SessionMetadata
+from nono_py import ProxyConfig, RouteConfig, SessionMetadata
 
 from langchain_nono import NonoSandbox
 
-if TYPE_CHECKING:
-    from nono_py._nono_py import NetworkAuditEvent
+
+class _CaptureServer(ThreadingHTTPServer):
+    last_path: str | None = None
+
+
+class _CaptureHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        self.server.last_path = self.path  # type: ignore[attr-defined]
+        body = b"ok\n"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+
+def _create_localhost_certificate(directory: str) -> tuple[str, str, str]:
+    ca_cert_path = Path(directory) / "localhost-ca.crt"
+    ca_key_path = Path(directory) / "localhost-ca.key"
+    cert_path = Path(directory) / "localhost.crt"
+    key_path = Path(directory) / "localhost.key"
+    csr_path = Path(directory) / "localhost.csr"
+    extfile_path = Path(directory) / "localhost.ext"
+    extfile_path.write_text(
+        "\n".join(
+            [
+                "basicConstraints=CA:FALSE",
+                "keyUsage = digitalSignature, keyEncipherment",
+                "extendedKeyUsage = serverAuth",
+                "subjectAltName = IP:127.0.0.1",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-out",
+            str(ca_cert_path),
+            "-keyout",
+            str(ca_key_path),
+            "-days",
+            "1",
+            "-sha256",
+            "-subj",
+            "/CN=langchain-nono-local-ca",
+            "-addext",
+            "basicConstraints=critical,CA:TRUE",
+            "-addext",
+            "keyUsage=critical,keyCertSign,cRLSign",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-new",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            str(key_path),
+            "-out",
+            str(csr_path),
+            "-subj",
+            "/CN=127.0.0.1",
+            "-addext",
+            "subjectAltName=IP:127.0.0.1",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        [
+            "openssl",
+            "x509",
+            "-req",
+            "-in",
+            str(csr_path),
+            "-CA",
+            str(ca_cert_path),
+            "-CAkey",
+            str(ca_key_path),
+            "-CAcreateserial",
+            "-out",
+            str(cert_path),
+            "-days",
+            "1",
+            "-sha256",
+            "-extfile",
+            str(extfile_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return str(ca_cert_path), str(cert_path), str(key_path)
 
 
 @pytest.fixture
@@ -85,6 +198,114 @@ class TestNonoSandboxCreation:
                 block_network=False,
             )
 
+    def test_proxy_config_uses_proxy_only_on_linux(
+        self, monkeypatch: pytest.MonkeyPatch, workdir: str
+    ) -> None:
+        """Linux proxy mode uses nono-py's localhost-restricted proxy mode."""
+        monkeypatch.setattr("langchain_nono.sandbox.platform.system", lambda: "Linux")
+
+        sandbox = NonoSandbox(
+            working_dir=workdir,
+            proxy_config=ProxyConfig(allowed_hosts=["example.com"]),
+        )
+        try:
+            assert sandbox.drain_network_audit_events() == []
+        finally:
+            sandbox.shutdown_proxy()
+
+    def test_proxy_env_vars_are_passed_to_sandboxed_exec(
+        self, monkeypatch: pytest.MonkeyPatch, workdir: str
+    ) -> None:
+        """Proxy env vars are passed through sandboxed_exec's clean env API."""
+        captured: dict[str, object] = {}
+        monkeypatch.setenv("NONO_HOST_SECRET", "host-secret")
+
+        def fake_sandboxed_exec(**kwargs):
+            captured["command"] = kwargs["command"]
+            captured["env"] = kwargs["env"]
+            captured["inherit_env"] = kwargs["inherit_env"]
+            return SimpleNamespace(stdout=b"ok\n", stderr=b"", exit_code=0)
+
+        monkeypatch.setattr(
+            "langchain_nono.sandbox.sandboxed_exec",
+            fake_sandboxed_exec,
+        )
+
+        sandbox = NonoSandbox(
+            working_dir=workdir,
+            proxy_config=ProxyConfig(allowed_hosts=["example.com"]),
+        )
+        try:
+            result = sandbox.execute("echo ok")
+        finally:
+            sandbox.shutdown_proxy()
+
+        env = dict(captured["env"])
+        assert result.exit_code == 0
+        assert captured["command"] == ["/bin/bash", "-c", "echo ok"]
+        assert captured["inherit_env"] is False
+        http_proxy = urlsplit(env["HTTP_PROXY"])
+        https_proxy = urlsplit(env["HTTPS_PROXY"])
+        assert http_proxy.scheme == "http"
+        assert http_proxy.hostname == "127.0.0.1"
+        assert http_proxy.port is not None
+        assert https_proxy.scheme == "http"
+        assert https_proxy.hostname == "127.0.0.1"
+        assert https_proxy.port == http_proxy.port
+        assert "NONO_PROXY_TOKEN" in env
+        assert "NONO_HOST_SECRET" not in env
+
+    def test_plain_env_is_passed_to_sandboxed_exec_without_inheritance(
+        self, monkeypatch: pytest.MonkeyPatch, workdir: str
+    ) -> None:
+        """Non-proxy execution also uses an explicit sanitized environment."""
+        captured: dict[str, object] = {}
+        monkeypatch.setenv("NONO_HOST_SECRET", "host-secret")
+
+        def fake_sandboxed_exec(**kwargs):
+            captured["env"] = kwargs["env"]
+            captured["inherit_env"] = kwargs["inherit_env"]
+            return SimpleNamespace(stdout=b"ok\n", stderr=b"", exit_code=0)
+
+        monkeypatch.setattr(
+            "langchain_nono.sandbox.sandboxed_exec",
+            fake_sandboxed_exec,
+        )
+
+        sandbox = NonoSandbox(working_dir=workdir)
+        result = sandbox.execute("echo ok")
+
+        env = dict(captured["env"])
+        assert result.exit_code == 0
+        assert captured["inherit_env"] is False
+        assert "PATH" in env
+        assert "NONO_HOST_SECRET" not in env
+
+    def test_macos_sets_curl_ca_bundle_without_granting_etc(
+        self, monkeypatch: pytest.MonkeyPatch, workdir: str
+    ) -> None:
+        """macOS curl can use the CA bundle without broad /etc access."""
+        captured: dict[str, object] = {}
+        monkeypatch.setattr("langchain_nono.sandbox.platform.system", lambda: "Darwin")
+        monkeypatch.setattr("langchain_nono.sandbox.os.path.exists", lambda _path: True)
+
+        def fake_sandboxed_exec(**kwargs):
+            captured["env"] = kwargs["env"]
+            return SimpleNamespace(stdout=b"ok\n", stderr=b"", exit_code=0)
+
+        monkeypatch.setattr(
+            "langchain_nono.sandbox.sandboxed_exec",
+            fake_sandboxed_exec,
+        )
+
+        sandbox = NonoSandbox(working_dir=workdir)
+        result = sandbox.execute("echo ok")
+
+        env = dict(captured["env"])
+        assert result.exit_code == 0
+        assert env["CURL_CA_BUNDLE"] == "/private/etc/ssl/cert.pem"
+        assert all(value != "/etc/ssl/cert.pem" for value in env.values())
+
 
 class TestNonoSandboxExecute:
     """Tests for command execution."""
@@ -134,56 +355,66 @@ class TestNonoSandboxExecute:
             assert result.exit_code == 0
             assert str(i) in result.output
 
-    def test_proxy_env_vars_are_injected(
+    def test_execute_does_not_inherit_host_env(
         self, monkeypatch: pytest.MonkeyPatch, workdir: str
     ) -> None:
-        """Proxy and credential env vars are passed to sandboxed_exec."""
-        captured: dict[str, object] = {}
+        """Host environment variables are not leaked into the child."""
+        monkeypatch.setenv("NONO_HOST_SECRET", "host-secret")
 
-        class FakeProxyHandle:
-            def env_vars(self) -> dict[str, str]:
-                return {"HTTP_PROXY": "http://127.0.0.1:1234"}
+        sandbox = NonoSandbox(working_dir=workdir)
 
-            def credential_env_vars(self) -> dict[str, str]:
-                return {"OPENAI_API_KEY": "PHANTOM_TOKEN"}
+        result = sandbox.execute('printf "%s" "${NONO_HOST_SECRET-unset}"')
 
-            def drain_audit_events(self) -> list[NetworkAuditEvent]:
-                return [{"decision": "allow", "target": "example.com"}]
+        assert result.exit_code == 0
+        assert result.output == "unset"
 
-            def shutdown(self) -> None:
-                captured["shutdown"] = True
-
-        def fake_start_proxy(config: ProxyConfig) -> FakeProxyHandle:
-            captured["proxy_config"] = config
-            return FakeProxyHandle()
-
-        def fake_sandboxed_exec(**kwargs):
-            captured["env"] = kwargs["env"]
-            return SimpleNamespace(stdout=b"ok\n", stderr=b"", exit_code=0)
-
-        monkeypatch.setattr("langchain_nono.sandbox.start_proxy", fake_start_proxy)
-        monkeypatch.setattr(
-            "langchain_nono.sandbox.sandboxed_exec",
-            fake_sandboxed_exec,
-        )
+    def test_reverse_proxy_route_is_reachable_when_network_blocked(
+        self, workdir: str
+    ) -> None:
+        """Reverse proxy routes remain reachable with direct network blocked."""
+        ca_cert_path, cert_path, key_path = _create_localhost_certificate(workdir)
+        upstream = _CaptureServer(("127.0.0.1", 0), _CaptureHandler)
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_context.load_cert_chain(certfile=cert_path, keyfile=key_path)
+        upstream.socket = ssl_context.wrap_socket(upstream.socket, server_side=True)
+        thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+        thread.start()
 
         sandbox = NonoSandbox(
             working_dir=workdir,
-            proxy_config=ProxyConfig(allowed_hosts=["example.com"]),
+            proxy_config=ProxyConfig(
+                allowed_hosts=["127.0.0.1"],
+                routes=[
+                    RouteConfig(
+                        prefix="/test",
+                        upstream=f"https://127.0.0.1:{upstream.server_port}",
+                        tls_ca=ca_cert_path,
+                    )
+                ],
+            ),
+            block_network=True,
         )
 
-        result = sandbox.execute("echo ok")
+        try:
+            result = sandbox.execute(
+                'curl -sf -H "Proxy-Authorization: Bearer ${NONO_PROXY_TOKEN}" ${TEST_BASE_URL}/hello'
+            )
+            events = sandbox.drain_network_audit_events()
+        finally:
+            sandbox.shutdown_proxy()
+            upstream.shutdown()
+            upstream.server_close()
+            thread.join(timeout=1)
 
         assert result.exit_code == 0
-        assert captured["env"] == [
-            ("HTTP_PROXY", "http://127.0.0.1:1234"),
-            ("OPENAI_API_KEY", "PHANTOM_TOKEN"),
-        ]
-        assert sandbox.drain_network_audit_events() == [
-            {"decision": "allow", "target": "example.com"}
-        ]
-        sandbox.shutdown_proxy()
-        assert captured["shutdown"] is True
+        assert result.output.strip() == "ok"
+        assert upstream.last_path == "/hello"
+        assert any(
+            event["mode"] == "reverse"
+            and event["decision"] == "allow"
+            and event.get("path") == "/hello"
+            for event in events
+        )
 
 
 class TestNonoSandboxFileTransfer:

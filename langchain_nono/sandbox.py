@@ -9,8 +9,10 @@ command. The parent remains unsandboxed.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import platform
+import shlex
 import sys
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -19,6 +21,7 @@ from deepagents.backends.protocol import (
     ExecuteResponse,
     FileDownloadResponse,
     FileUploadResponse,
+    GrepResult,
 )
 from deepagents.backends.sandbox import BaseSandbox
 from nono_py import (
@@ -45,6 +48,21 @@ _SYSTEM_PATHS_MACOS = [
     "/private/etc",
     "/private/var/run",
     "/Library/Frameworks",
+]
+
+# Minimal ambient environment preserved for child shell usability.
+# Everything else is dropped so host secrets do not leak into the sandbox.
+_SAFE_ENV_KEYS = [
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LOGNAME",
+    "PATH",
+    "SHELL",
+    "TERM",
+    "TMPDIR",
+    "USER",
 ]
 
 # Maximum bytes of combined stdout+stderr to return from execute().
@@ -122,7 +140,6 @@ class NonoSandbox(BaseSandbox):
         self._default_timeout = timeout
         self._max_output_bytes = max_output_bytes
         self._proxy_handle = None
-        self._proxy_env: list[tuple[str, str]] | None = None
         self._snapshot_manager = None
 
         # Track allowed paths for file transfer boundary enforcement.
@@ -189,14 +206,12 @@ class NonoSandbox(BaseSandbox):
                     continue
                 self._register_transfer_path(capability.resolved, capability.access)
 
-        if block_network:
+        if proxy_config is None and block_network:
             self._caps.block_network()
 
         if proxy_config is not None:
             self._proxy_handle = start_proxy(proxy_config)
-            self._proxy_env = list(self._proxy_handle.env_vars().items()) + list(
-                self._proxy_handle.credential_env_vars().items()
-            )
+            self._caps.proxy_only(self._proxy_handle)
 
         if snapshot_session_dir is not None:
             tracked_paths = snapshot_tracked_paths or [self._working_dir]
@@ -281,7 +296,8 @@ class NonoSandbox(BaseSandbox):
             command=["/bin/bash", "-c", command],
             cwd=self._working_dir,
             timeout_secs=float(effective_timeout),
-            env=self._proxy_env,
+            env=self._sandbox_env(),
+            inherit_env=False,
         )
 
         output = result.stdout.decode("utf-8", errors="replace")
@@ -298,6 +314,22 @@ class NonoSandbox(BaseSandbox):
             exit_code=result.exit_code,
             truncated=truncated,
         )
+
+    def _sandbox_env(self) -> list[tuple[str, str]]:
+        """Build the explicit child environment for sandboxed execution."""
+        child_env: dict[str, str] = {}
+        for key in _SAFE_ENV_KEYS:
+            value = os.environ.get(key)
+            if value is not None:
+                child_env[key] = value
+        if platform.system() == "Darwin" and "CURL_CA_BUNDLE" not in child_env:
+            cert_path = "/private/etc/ssl/cert.pem"
+            if os.path.exists(cert_path):
+                child_env["CURL_CA_BUNDLE"] = cert_path
+        env = list(child_env.items())
+        if self._proxy_handle is not None:
+            return self._proxy_handle.sandbox_env(extra_env=env)
+        return env
 
     def upload_files(
         self,
@@ -335,6 +367,56 @@ class NonoSandbox(BaseSandbox):
                 )
         return responses
 
+    def grep(
+        self,
+        pattern: str,
+        path: str | None = None,
+        glob: str | None = None,
+    ) -> GrepResult:
+        """Search file contents using a portable Python implementation."""
+        script = (
+            "import fnmatch, json, os, sys\n"
+            f"pattern = {pattern!r}\n"
+            f"search_path = {path or '.'!r}\n"
+            f"glob_pattern = {glob!r}\n"
+            "matches = []\n"
+            "def should_scan(file_path):\n"
+            "    return glob_pattern is None or fnmatch.fnmatch(os.path.basename(file_path), glob_pattern)\n"
+            "def scan(file_path):\n"
+            "    if not should_scan(file_path):\n"
+            "        return\n"
+            "    try:\n"
+            "        with open(file_path, 'r', encoding='utf-8', errors='replace') as handle:\n"
+            "            for line_number, line in enumerate(handle, 1):\n"
+            "                if pattern in line:\n"
+            "                    matches.append({'path': file_path, 'line': line_number, 'text': line.rstrip('\\n')})\n"
+            "    except OSError:\n"
+            "        return\n"
+            "if os.path.isfile(search_path):\n"
+            "    scan(search_path)\n"
+            "elif os.path.isdir(search_path):\n"
+            "    for root, dirs, files in os.walk(search_path):\n"
+            "        dirs[:] = [d for d in dirs if not d.startswith('.')]\n"
+            "        for name in files:\n"
+            "            scan(os.path.join(root, name))\n"
+            "else:\n"
+            "    print(json.dumps({'error': f\"Path {search_path!r}: not found\"}))\n"
+            "    sys.exit(0)\n"
+            "print(json.dumps({'matches': matches}))\n"
+        )
+        result = self.execute(f"python3 -c {shlex.quote(script)}")
+        output = result.output.strip()
+        try:
+            data = json.loads(output)
+        except (json.JSONDecodeError, ValueError):
+            detail = output[:200] if output else "(empty)"
+            return GrepResult(
+                error=f"Path '{path or '.'}': unexpected server response: {detail}"
+            )
+        if "error" in data:
+            return GrepResult(error=data["error"])
+        return GrepResult(matches=data.get("matches", []))
+
     def drain_network_audit_events(self) -> list[NetworkAuditEvent]:
         """Drain audit events from the configured proxy."""
         if self._proxy_handle is None:
@@ -347,7 +429,6 @@ class NonoSandbox(BaseSandbox):
             return
         self._proxy_handle.shutdown()
         self._proxy_handle = None
-        self._proxy_env = None
 
     def create_snapshot_baseline(self):
         """Create a baseline snapshot for the configured session."""

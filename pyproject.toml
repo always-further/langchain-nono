@@ -24,8 +24,8 @@ classifiers = [
 version = "0.2.1"
 requires-python = ">=3.11,<4.0"
 dependencies = [
-    "deepagents>=0.4.10,<0.5",
-    "nono-py>=0.7.1",
+    "deepagents>=0.6.8,<0.7",
+    "nono-py>=0.10.1",
 ]
 
 [tool.hatch.build.targets.wheel]

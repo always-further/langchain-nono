@@ -20,9 +20,11 @@ def test_import_sandbox_class() -> None:
 def test_import_message_helpers() -> None:
     """Verify message helpers are importable from the package."""
     from langchain_nono import (
+        ExternalProxyConfig,
         describe_execute_failure,
         describe_file_transfer_error,
     )
 
+    assert ExternalProxyConfig is not None
     assert describe_execute_failure is not None
     assert describe_file_transfer_error is not None

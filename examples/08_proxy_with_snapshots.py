@@ -63,7 +63,7 @@ def main() -> None:
 
         # Make a network request through the proxy
         net_result = sandbox.execute(
-            "curl -sf -o /dev/null http://example.com 2>&1 || true"
+            "curl -sf -o /dev/null https://example.com 2>&1 || true"
         )
         print(f"   Network request exit_code: {net_result.exit_code}\n")
 

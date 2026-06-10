@@ -3,6 +3,7 @@
 from nono_py import (
     Change,
     ExclusionConfig,
+    ExternalProxyConfig,
     InjectMode,
     ProxyConfig,
     RouteConfig,
@@ -19,6 +20,7 @@ from langchain_nono.sandbox import NonoSandbox
 __all__ = [
     "Change",
     "ExclusionConfig",
+    "ExternalProxyConfig",
     "InjectMode",
     "NonoSandbox",
     "ProxyConfig",
