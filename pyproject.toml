@@ -21,7 +21,7 @@ classifiers = [
     "Topic :: Security",
 ]
 
-version = "0.2.1"
+version = "0.3.0"
 requires-python = ">=3.11,<4.0"
 dependencies = [
     "deepagents>=0.6.8,<0.7",
@@ -38,6 +38,7 @@ Documentation = "https://github.com/always-further/langchain-nono"
 
 [dependency-groups]
 dev = [
+    "cryptography>=46.0.0",
     "pytest>=7.3.0,<10.0.0",
     "pytest-cov",
     "pytest-socket",

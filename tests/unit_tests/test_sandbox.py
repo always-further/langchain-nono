@@ -5,15 +5,20 @@ from __future__ import annotations
 import json
 import os
 import ssl
-import subprocess
 import tempfile
 import threading
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from ipaddress import IPv4Address
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from nono_py import ProxyConfig, RouteConfig, SessionMetadata
 
 from langchain_nono import NonoSandbox
@@ -39,93 +44,100 @@ class _CaptureHandler(BaseHTTPRequestHandler):
 
 def _create_localhost_certificate(directory: str) -> tuple[str, str, str]:
     ca_cert_path = Path(directory) / "localhost-ca.crt"
-    ca_key_path = Path(directory) / "localhost-ca.key"
     cert_path = Path(directory) / "localhost.crt"
     key_path = Path(directory) / "localhost.key"
-    csr_path = Path(directory) / "localhost.csr"
-    extfile_path = Path(directory) / "localhost.ext"
-    extfile_path.write_text(
-        "\n".join(
-            [
-                "basicConstraints=CA:FALSE",
-                "keyUsage = digitalSignature, keyEncipherment",
-                "extendedKeyUsage = serverAuth",
-                "subjectAltName = IP:127.0.0.1",
-            ]
+
+    now = datetime.now(UTC)
+    ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    ca_subject = x509.Name(
+        [x509.NameAttribute(NameOID.COMMON_NAME, "langchain-nono-local-ca")]
+    )
+    ca_cert = (
+        x509.CertificateBuilder()
+        .subject_name(ca_subject)
+        .issuer_name(ca_subject)
+        .public_key(ca_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=False,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
         )
-        + "\n",
-        encoding="utf-8",
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()),
+            critical=False,
+        )
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()),
+            critical=False,
+        )
+        .sign(ca_key, hashes.SHA256())
     )
-    subprocess.run(
-        [
-            "openssl",
-            "req",
-            "-x509",
-            "-newkey",
-            "rsa:2048",
-            "-nodes",
-            "-out",
-            str(ca_cert_path),
-            "-keyout",
-            str(ca_key_path),
-            "-days",
-            "1",
-            "-sha256",
-            "-subj",
-            "/CN=langchain-nono-local-ca",
-            "-addext",
-            "basicConstraints=critical,CA:TRUE",
-            "-addext",
-            "keyUsage=critical,keyCertSign,cRLSign",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
+
+    server_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    server_subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")])
+    server_cert = (
+        x509.CertificateBuilder()
+        .subject_name(server_subject)
+        .issuer_name(ca_cert.subject)
+        .public_key(server_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=True,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(
+            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]),
+            critical=False,
+        )
+        .add_extension(
+            x509.SubjectAlternativeName([x509.IPAddress(IPv4Address("127.0.0.1"))]),
+            critical=False,
+        )
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(server_key.public_key()),
+            critical=False,
+        )
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()),
+            critical=False,
+        )
+        .sign(ca_key, hashes.SHA256())
     )
-    subprocess.run(
-        [
-            "openssl",
-            "req",
-            "-new",
-            "-newkey",
-            "rsa:2048",
-            "-nodes",
-            "-keyout",
-            str(key_path),
-            "-out",
-            str(csr_path),
-            "-subj",
-            "/CN=127.0.0.1",
-            "-addext",
-            "subjectAltName=IP:127.0.0.1",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    subprocess.run(
-        [
-            "openssl",
-            "x509",
-            "-req",
-            "-in",
-            str(csr_path),
-            "-CA",
-            str(ca_cert_path),
-            "-CAkey",
-            str(ca_key_path),
-            "-CAcreateserial",
-            "-out",
-            str(cert_path),
-            "-days",
-            "1",
-            "-sha256",
-            "-extfile",
-            str(extfile_path),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
+
+    ca_cert_path.write_bytes(ca_cert.public_bytes(serialization.Encoding.PEM))
+    cert_path.write_bytes(server_cert.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        server_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        )
     )
     return str(ca_cert_path), str(cert_path), str(key_path)
 
