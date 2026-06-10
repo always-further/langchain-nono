@@ -111,7 +111,10 @@ proxy_config = NonoSandbox.resolve_proxy_from_policy(
 
 The proxy can inject real API credentials on outbound requests, so
 sandboxed code never sees real keys. Real credentials are loaded from
-the host's OS keyring; the child only receives proxy routing variables.
+the host's OS keyring. When `env_var` is configured on a route, the
+sandboxed child receives a route-scoped phantom token in that variable;
+the proxy swaps that phantom token for the real credential before
+forwarding upstream.
 
 When proxy mode is enabled, `langchain-nono` uses nono-py's proxy-only
 network mode so sandboxed code can connect only to the local proxy port;
@@ -132,15 +135,19 @@ sandbox = NonoSandbox(
                 inject_mode=InjectMode.HEADER,
                 inject_header="Authorization",
                 credential_format="Bearer {}",
+                env_var="OPENAI_API_KEY",          # Phantom token env var
             )
         ],
     ),
     block_network=True,
 )
 
-# The child sees OPENAI_API_KEY unset and OPENAI_BASE_URL=http://127.0.0.1:<port>/openai
-# The proxy injects the real key on outbound requests.
-result = sandbox.execute("curl $OPENAI_BASE_URL/v1/models")
+# The child sees OPENAI_API_KEY=<phantom> and OPENAI_BASE_URL=http://127.0.0.1:<port>/openai.
+# The proxy swaps the phantom token for the real key on outbound requests.
+result = sandbox.execute(
+    "curl $OPENAI_BASE_URL/v1/models "
+    "-H 'Authorization: Bearer $OPENAI_API_KEY'"
+)
 ```
 
 Injection modes: `HEADER`, `QUERY_PARAM`, `BASIC_AUTH`, `URL_PATH`.

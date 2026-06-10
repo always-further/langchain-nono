@@ -339,8 +339,16 @@ class TestNonoSandboxExecute:
 
     def test_sandbox_blocks_forbidden_paths(self, sandbox: NonoSandbox) -> None:
         """Sandbox prevents access to paths outside the capability set."""
-        result = sandbox.execute("cat /etc/passwd")
+        result = sandbox.execute("cat /etc/hosts")
         assert result.exit_code != 0
+
+    def test_sandbox_does_not_grant_private_etc_directory(
+        self, sandbox: NonoSandbox
+    ) -> None:
+        """macOS support files must not imply broad /private/etc access."""
+        result = sandbox.execute("test -r /private/etc && echo readable || echo denied")
+        assert result.exit_code == 0
+        assert result.output.strip() == "denied"
 
     def test_write_and_read(self, sandbox: NonoSandbox) -> None:
         """Can write and read files in the working directory."""

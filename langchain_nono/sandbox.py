@@ -45,9 +45,12 @@ if TYPE_CHECKING:
 # These are read-only and scoped to what bash/coreutils need.
 _SYSTEM_PATHS_COMMON = ["/usr", "/bin", "/sbin", "/lib"]
 _SYSTEM_PATHS_MACOS = [
-    "/private/etc",
     "/private/var/run",
     "/Library/Frameworks",
+]
+_SYSTEM_FILES_MACOS = [
+    "/private/etc/ssl/cert.pem",
+    "/private/etc/ssl/openssl.cnf",
 ]
 
 # Minimal ambient environment preserved for child shell usability.
@@ -157,6 +160,11 @@ class NonoSandbox(BaseSandbox):
         for sys_path in sys_paths:
             with contextlib.suppress(FileNotFoundError):
                 self._caps.allow_path(sys_path, AccessMode.READ)
+
+        if platform.system() == "Darwin":
+            for sys_file in _SYSTEM_FILES_MACOS:
+                with contextlib.suppress(FileNotFoundError):
+                    self._caps.allow_file(sys_file, AccessMode.READ)
 
         # /dev needs read for /dev/urandom, /dev/tty etc.
         # /dev/null specifically needs write for shell redirects (2>/dev/null).
