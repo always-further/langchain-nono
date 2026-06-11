@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import ssl
 import tempfile
 import threading
@@ -19,18 +20,21 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
-from nono_py import ProxyConfig, RouteConfig, SessionMetadata
+from deepagents.backends.protocol import FileDownloadResponse, FileUploadResponse
+from nono_py import InjectMode, ProxyConfig, RouteConfig, SessionMetadata
 
 from langchain_nono import NonoSandbox
 
 
 class _CaptureServer(ThreadingHTTPServer):
     last_path: str | None = None
+    last_authorization: str | None = None
 
 
 class _CaptureHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         self.server.last_path = self.path  # type: ignore[attr-defined]
+        self.server.last_authorization = self.headers.get("Authorization")  # type: ignore[attr-defined]
         body = b"ok\n"
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
@@ -436,6 +440,59 @@ class TestNonoSandboxExecute:
             for event in events
         )
 
+    def test_env_credential_route_injects_real_value_without_exposing_it(
+        self, monkeypatch: pytest.MonkeyPatch, workdir: str
+    ) -> None:
+        """env:// routes load host env credentials and expose only phantom env."""
+        monkeypatch.setenv("OPENAI_API_KEY", "demo-real-secret")
+        upstream = _CaptureServer(("127.0.0.1", 0), _CaptureHandler)
+        thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+        thread.start()
+
+        sandbox = NonoSandbox(
+            working_dir=workdir,
+            proxy_config=ProxyConfig(
+                allowed_hosts=["127.0.0.1"],
+                routes=[
+                    RouteConfig(
+                        prefix="/openai",
+                        upstream=f"http://127.0.0.1:{upstream.server_port}",
+                        credential_key="env://OPENAI_API_KEY",
+                        inject_mode=InjectMode.HEADER,
+                        inject_header="Authorization",
+                        credential_format="Bearer {}",
+                        env_var="OPENAI_API_KEY",
+                    )
+                ],
+            ),
+            block_network=True,
+        )
+
+        try:
+            child_secret = sandbox.execute('printf "%s" "$OPENAI_API_KEY"')
+            request_script = """
+import os
+import urllib.request
+
+request = urllib.request.Request(
+    os.environ["OPENAI_BASE_URL"] + "/models",
+    headers={"Authorization": "Bearer " + os.environ["OPENAI_API_KEY"]},
+)
+with urllib.request.urlopen(request, timeout=30) as response:
+    print(response.read().decode())
+"""
+            result = sandbox.execute(f"python3 -c {shlex.quote(request_script)}")
+        finally:
+            sandbox.shutdown_proxy()
+            upstream.shutdown()
+            upstream.server_close()
+            thread.join(timeout=1)
+
+        assert result.exit_code == 0
+        assert child_secret.output
+        assert child_secret.output != "demo-real-secret"
+        assert upstream.last_authorization == "Bearer demo-real-secret"
+
 
 class TestNonoSandboxFileTransfer:
     """Tests for upload/download operations."""
@@ -523,6 +580,37 @@ class TestNonoSandboxFileTransfer:
         assert len(responses) == 1
         assert responses[0].content is not None
         assert b"agent output" in responses[0].content
+
+    def test_virtual_workspace_root_write_returns_real_workspace_path(
+        self, workdir: str
+    ) -> None:
+        """Deep Agents-style /file paths can resolve into the workspace."""
+        real = os.path.realpath(workdir)
+        sandbox = NonoSandbox(working_dir=workdir, virtual_workspace_root=True)
+
+        result = sandbox.write("/hello.py", 'print("Hello, World!")\n')
+
+        assert result.error is None
+        assert result.path == os.path.join(real, "hello.py")
+        run = sandbox.execute(f"python3 {result.path}")
+        assert run.exit_code == 0
+        assert run.output.strip() == "Hello, World!"
+
+    def test_virtual_workspace_root_upload_download_roundtrip(
+        self, workdir: str
+    ) -> None:
+        """Virtual absolute paths are mapped under the concrete workspace."""
+        real = os.path.realpath(workdir)
+        sandbox = NonoSandbox(working_dir=workdir, virtual_workspace_root=True)
+
+        upload = sandbox.upload_files([("/notes/todo.txt", b"ship it")])
+        download = sandbox.download_files(["/notes/todo.txt"])
+
+        assert upload == [FileUploadResponse(path="/notes/todo.txt", error=None)]
+        assert download == [
+            FileDownloadResponse(path="/notes/todo.txt", content=b"ship it", error=None)
+        ]
+        assert os.path.exists(os.path.join(real, "notes", "todo.txt"))
 
     def test_upload_batch_partial_failure(
         self, sandbox: NonoSandbox, workdir: str

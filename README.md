@@ -17,38 +17,52 @@ pip install langchain-nono
 ## Usage
 
 ```python
-import json
+import uuid
+from pathlib import Path
 
+from langchain_anthropic import ChatAnthropic
 from deepagents import create_deep_agent
 from langchain_nono import NonoSandbox
-from nono_py import ProxyConfig, RouteConfig
+
+thread_id = str(uuid.uuid4())
+working_dir = Path("/tmp/agent-sandboxes") / thread_id
+working_dir.mkdir(parents=True, exist_ok=True)
 
 sandbox = NonoSandbox(
-    working_dir="/tmp/agent-workspace",
-    proxy_config=ProxyConfig(
-        allowed_hosts=["api.openai.com"],
-        routes=[
-            RouteConfig(
-                prefix="/openai",
-                upstream="https://api.openai.com",
-                credential_key="openai-key",
-            )
-        ],
-    ),
-    block_network=True,
+    working_dir=str(working_dir),
+    virtual_workspace_root=True,
 )
 
 agent = create_deep_agent(
     backend=sandbox,
-    system_prompt="You are a coding assistant.",
+    model=ChatAnthropic(model_name="claude-sonnet-4-6"),
+    system_prompt="You are a coding assistant with sandbox access.",
 )
+
+result = agent.invoke(
+    {
+        "messages": [
+            {
+                "role": "user",
+                "content": "Create a hello world Python script and run it",
+            }
+        ]
+    },
+    config={"configurable": {"thread_id": thread_id}},
+)
+print(result["messages"][-1].content)
 ```
+
+`virtual_workspace_root=True` lets Deep Agents use absolute tool paths such as
+`/hello.py` while `langchain-nono` stores the file under the concrete per-thread
+workspace, for example `/tmp/agent-sandboxes/<thread-id>/hello.py`.
 
 ## Configuration
 
 ```python
 sandbox = NonoSandbox(
     working_dir="/tmp/agent-workspace",     # Required: read-write access
+    virtual_workspace_root=True,            # Map /file.py to working_dir/file.py for Deep Agents
     allow_read=["/data/models"],            # Additional read-only paths
     allow_readwrite=["/tmp/scratch"],        # Additional read-write paths
     policy_json=json.dumps({                # Optional: nono policy JSON
@@ -77,23 +91,24 @@ host filtering and credential injection apply to sandboxed child processes
 without extra wiring in the caller.
 
 ```python
-from langchain_nono import InjectMode, NonoSandbox, ProxyConfig, RouteConfig
+import shlex
+
+from langchain_nono import NonoSandbox, ProxyConfig
 
 sandbox = NonoSandbox(
     working_dir="/tmp/agent-workspace",
-    proxy_config=ProxyConfig(
-        allowed_hosts=["api.openai.com"],
-        routes=[
-            RouteConfig(
-                prefix="/openai",
-                upstream="https://api.openai.com",
-                credential_key="openai-key",
-                inject_mode=InjectMode.HEADER,
-            )
-        ],
-    ),
+    proxy_config=ProxyConfig(allowed_hosts=["example.com"]),
     block_network=True,
 )
+
+request_script = """
+import urllib.request
+
+with urllib.request.urlopen("https://example.com", timeout=30) as response:
+    print(response.status)
+"""
+result = sandbox.execute(f"python3 -c {shlex.quote(request_script)}")
+print(result.exit_code)
 
 events = sandbox.drain_network_audit_events()
 sandbox.shutdown_proxy()
@@ -110,10 +125,10 @@ proxy_config = NonoSandbox.resolve_proxy_from_policy(
 ## Credential Injection
 
 The proxy can inject real API credentials on outbound requests, so
-sandboxed code never sees real keys. Real credentials are loaded from
-the host's OS keyring. When `env_var` is configured on a route, the
-sandboxed child receives a route-scoped phantom token in that variable;
-the proxy swaps that phantom token for the real credential before
+sandboxed code never sees real keys. Real credentials can be loaded from
+host-side sources such as `env://OPENAI_API_KEY`. When `env_var` is configured
+on a route, the sandboxed child receives a route-scoped phantom token in that
+variable; the proxy swaps that phantom token for the real credential before
 forwarding upstream.
 
 When proxy mode is enabled, `langchain-nono` uses nono-py's proxy-only
@@ -121,7 +136,10 @@ network mode so sandboxed code can connect only to the local proxy port;
 all direct outbound network access remains blocked.
 
 ```python
+import shlex
+
 from langchain_nono import InjectMode, NonoSandbox, ProxyConfig, RouteConfig
+
 
 sandbox = NonoSandbox(
     working_dir="/tmp/agent-workspace",
@@ -131,7 +149,7 @@ sandbox = NonoSandbox(
             RouteConfig(
                 prefix="/openai",
                 upstream="https://api.openai.com",
-                credential_key="openai-key",       # OS keyring lookup
+                credential_key="env://OPENAI_API_KEY",  # Host env lookup
                 inject_mode=InjectMode.HEADER,
                 inject_header="Authorization",
                 credential_format="Bearer {}",
@@ -142,12 +160,24 @@ sandbox = NonoSandbox(
     block_network=True,
 )
 
-# The child sees OPENAI_API_KEY=<phantom> and OPENAI_BASE_URL=http://127.0.0.1:<port>/openai.
-# The proxy swaps the phantom token for the real key on outbound requests.
-result = sandbox.execute(
-    "curl $OPENAI_BASE_URL/v1/models "
-    "-H 'Authorization: Bearer $OPENAI_API_KEY'"
+try:
+    # The child sees OPENAI_API_KEY=<phantom> and OPENAI_BASE_URL=http://127.0.0.1:<port>/openai.
+    # The proxy swaps the phantom token for the real key on outbound requests.
+    request_script = """
+import os
+import urllib.request
+
+request = urllib.request.Request(
+    os.environ["OPENAI_BASE_URL"] + "/v1/models",
+    headers={"Authorization": "Bearer " + os.environ["OPENAI_API_KEY"]},
 )
+with urllib.request.urlopen(request, timeout=30) as response:
+    print(response.read().decode())
+"""
+    result = sandbox.execute(f"python3 -c {shlex.quote(request_script)}")
+    print(result.output)
+finally:
+    sandbox.shutdown_proxy()
 ```
 
 Injection modes: `HEADER`, `QUERY_PARAM`, `BASIC_AUTH`, `URL_PATH`.
@@ -158,18 +188,52 @@ Pass `snapshot_session_dir=...` to enable content-addressable snapshots and
 rollback for the sandbox workspace.
 
 ```python
-from langchain_nono import ExclusionConfig, NonoSandbox, SessionMetadata
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
-sandbox = NonoSandbox(
-    working_dir="/tmp/agent-workspace",
-    snapshot_session_dir="/tmp/nono-session",
-    snapshot_exclusion=ExclusionConfig(exclude_patterns=["node_modules"]),
-)
+from langchain_nono import ExclusionConfig, NonoSandbox
 
-baseline = sandbox.create_snapshot_baseline()
-manifest, changes = sandbox.create_snapshot_incremental()
-diff = sandbox.compute_restore_diff(0)        # dry-run preview
-restored = sandbox.restore_snapshot(0)         # actual rollback
+
+def print_changes(title, changes):
+    print(title)
+    for change in changes:
+        print(f"  - {change.change_type}: {Path(change.path).name}")
+
+
+with (
+    TemporaryDirectory(prefix="agent-workspace-") as workspace,
+    TemporaryDirectory(prefix="nono-session-") as session_dir,
+):
+    sandbox = NonoSandbox(
+        working_dir=workspace,
+        snapshot_session_dir=session_dir,
+        snapshot_exclusion=ExclusionConfig(exclude_patterns=["node_modules"]),
+    )
+
+    sandbox.execute("printf 'version 1\n' > app.txt")
+    baseline = sandbox.create_snapshot_baseline()
+    print("Baseline snapshot")
+    print(f"  app.txt contains: {sandbox.execute('cat app.txt').output.strip()!r}")
+
+    sandbox.execute("printf 'version 2\n' > app.txt")
+    sandbox.execute("printf 'generated\n' > output.txt")
+    manifest, changes = sandbox.create_snapshot_incremental()
+
+    print("\nAgent changed the workspace")
+    print(f"  app.txt now contains: {sandbox.execute('cat app.txt').output.strip()!r}")
+    print_changes("Snapshot detected:", changes)
+    print(f"  Merkle root changed: {baseline.merkle_root != manifest.merkle_root}")
+
+    diff = sandbox.compute_restore_diff(0)
+    print_changes("\nDry-run restore preview:", diff)
+
+    restored = sandbox.restore_snapshot(0)
+    print(f"\nRestored baseline by applying {len(restored)} change(s)")
+    print(f"  app.txt contains: {sandbox.execute('cat app.txt').output.strip()!r}")
+    print(
+        "  output.txt:",
+        sandbox.execute("test -e output.txt && echo exists || echo removed").output.strip(),
+    )
 ```
 
 ### Session Metadata

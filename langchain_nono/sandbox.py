@@ -14,14 +14,20 @@ import os
 import platform
 import shlex
 import sys
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from deepagents.backends.protocol import (
+    EditResult,
     ExecuteResponse,
     FileDownloadResponse,
     FileUploadResponse,
+    GlobResult,
     GrepResult,
+    LsResult,
+    ReadResult,
+    WriteResult,
 )
 from deepagents.backends.sandbox import BaseSandbox
 from nono_py import (
@@ -103,6 +109,11 @@ class NonoSandbox(BaseSandbox):
         block_network: Whether to block all outbound network access.
         timeout: Default command timeout in seconds (must be positive).
         max_output_bytes: Maximum bytes of output to return from execute().
+        virtual_workspace_root: Treat absolute file-tool paths outside
+            explicitly granted host paths as paths relative to working_dir.
+            This is useful with Deep Agents, whose filesystem tools require
+            absolute paths such as /hello.py even when the concrete sandbox
+            workspace is a host path like /tmp/agent-workspaces/<id>.
     """
 
     def __init__(
@@ -123,6 +134,7 @@ class NonoSandbox(BaseSandbox):
         block_network: bool = True,
         timeout: int = 30 * 60,
         max_output_bytes: int = _MAX_OUTPUT_BYTES,
+        virtual_workspace_root: bool = False,
     ) -> None:
         """Create a sandbox backend with the given capabilities."""
         if timeout <= 0:
@@ -142,6 +154,7 @@ class NonoSandbox(BaseSandbox):
         self._working_dir = os.path.realpath(working_dir)
         self._default_timeout = timeout
         self._max_output_bytes = max_output_bytes
+        self._virtual_workspace_root = virtual_workspace_root
         self._proxy_handle = None
         self._snapshot_manager = None
 
@@ -253,6 +266,32 @@ class NonoSandbox(BaseSandbox):
         """Check if a path falls within a writable directory."""
         return self._check_path_in_list(path, self._writable_paths)
 
+    def _resolve_api_path(self, path: str) -> str:
+        """Resolve a file-tool API path to a concrete host path.
+
+        Deep Agents requires absolute file-tool paths. When
+        virtual_workspace_root is enabled, paths that are not already inside an
+        explicit host grant are interpreted as workspace-relative virtual paths.
+        """
+        if not path.startswith("/"):
+            msg = "path must be absolute"
+            raise ValueError(msg)
+        if not self._virtual_workspace_root:
+            return path
+
+        real_path = os.path.realpath(path)
+        allowed_paths = self._readable_paths + self._writable_paths
+        if self._check_path_in_list(real_path, allowed_paths):
+            return real_path
+
+        parts = PurePosixPath(path).parts
+        if ".." in parts:
+            msg = "path must not contain '..'"
+            raise ValueError(msg)
+        if path == "/":
+            return self._working_dir
+        return os.path.join(self._working_dir, path.lstrip("/"))
+
     @staticmethod
     def _check_path_in_list(path: str, allowed: list[str]) -> bool:
         """Check if path falls within any allowed directory.
@@ -356,17 +395,19 @@ class NonoSandbox(BaseSandbox):
         """
         responses: list[FileUploadResponse] = []
         for path, content in files:
-            if not path.startswith("/"):
+            try:
+                resolved_path = self._resolve_api_path(path)
+            except ValueError:
                 responses.append(FileUploadResponse(path=path, error="invalid_path"))
                 continue
-            if not self._is_path_writable(path):
+            if not self._is_path_writable(resolved_path):
                 responses.append(
                     FileUploadResponse(path=path, error="permission_denied")
                 )
                 continue
             try:
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                with open(path, "wb") as f:
+                os.makedirs(os.path.dirname(resolved_path), exist_ok=True)
+                with open(resolved_path, "wb") as f:
                     f.write(content)
                 responses.append(FileUploadResponse(path=path, error=None))
             except OSError:
@@ -375,6 +416,79 @@ class NonoSandbox(BaseSandbox):
                 )
         return responses
 
+    def write(
+        self,
+        file_path: str,
+        content: str,
+    ) -> WriteResult:
+        """Create a new file, resolving virtual workspace paths when enabled."""
+        try:
+            resolved_path = self._resolve_api_path(file_path)
+        except ValueError as exc:
+            return WriteResult(error=f"Invalid path '{file_path}': {exc}")
+
+        preflight_error = self._write_preflight(resolved_path)
+        if preflight_error is not None:
+            return preflight_error
+
+        responses = self.upload_files([(resolved_path, content.encode("utf-8"))])
+        if not responses:
+            msg = f"Responses was expected to return 1 result, but it returned {len(responses)} with type {type(responses)}"
+            raise AssertionError(msg)
+        response = responses[0]
+        if response.error:
+            return WriteResult(
+                error=f"Failed to write file '{resolved_path}': {response.error}"
+            )
+
+        return WriteResult(path=resolved_path)
+
+    def read(
+        self,
+        file_path: str,
+        offset: int = 0,
+        limit: int = 2000,
+    ) -> ReadResult:
+        """Read a file, resolving virtual workspace paths when enabled."""
+        try:
+            resolved_path = self._resolve_api_path(file_path)
+        except ValueError as exc:
+            return ReadResult(error=f"Invalid path '{file_path}': {exc}")
+        return super().read(resolved_path, offset=offset, limit=limit)
+
+    def edit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,  # noqa: FBT001, FBT002
+    ) -> EditResult:
+        """Edit a file, resolving virtual workspace paths when enabled."""
+        try:
+            resolved_path = self._resolve_api_path(file_path)
+        except ValueError as exc:
+            return EditResult(error=f"Invalid path '{file_path}': {exc}")
+        return super().edit(resolved_path, old_string, new_string, replace_all)
+
+    def ls(self, path: str) -> LsResult:
+        """List a directory, resolving virtual workspace paths when enabled."""
+        try:
+            resolved_path = self._resolve_api_path(path)
+        except ValueError as exc:
+            return LsResult(entries=None, error=f"Invalid path '{path}': {exc}")
+        return super().ls(resolved_path)
+
+    def glob(self, pattern: str, path: str | None = None) -> GlobResult:
+        """Find files, resolving virtual workspace paths when enabled."""
+        if path is None:
+            resolved_path = self._working_dir if self._virtual_workspace_root else None
+        else:
+            try:
+                resolved_path = self._resolve_api_path(path)
+            except ValueError as exc:
+                return GlobResult(matches=None, error=f"Invalid path '{path}': {exc}")
+        return super().glob(pattern, path=resolved_path)
+
     def grep(
         self,
         pattern: str,
@@ -382,10 +496,17 @@ class NonoSandbox(BaseSandbox):
         glob: str | None = None,
     ) -> GrepResult:
         """Search file contents using a portable Python implementation."""
+        if path is None:
+            search_path = "."
+        else:
+            try:
+                search_path = self._resolve_api_path(path)
+            except ValueError as exc:
+                return GrepResult(error=f"Invalid path '{path}': {exc}")
         script = (
             "import fnmatch, json, os, sys\n"
             f"pattern = {pattern!r}\n"
-            f"search_path = {path or '.'!r}\n"
+            f"search_path = {search_path!r}\n"
             f"glob_pattern = {glob!r}\n"
             "matches = []\n"
             "def should_scan(file_path):\n"
@@ -523,12 +644,14 @@ class NonoSandbox(BaseSandbox):
         """
         responses: list[FileDownloadResponse] = []
         for path in paths:
-            if not path.startswith("/"):
+            try:
+                resolved_path = self._resolve_api_path(path)
+            except ValueError:
                 responses.append(
                     FileDownloadResponse(path=path, content=None, error="invalid_path")
                 )
                 continue
-            if not self._is_path_readable(path):
+            if not self._is_path_readable(resolved_path):
                 responses.append(
                     FileDownloadResponse(
                         path=path, content=None, error="permission_denied"
@@ -536,14 +659,14 @@ class NonoSandbox(BaseSandbox):
                 )
                 continue
             try:
-                if os.path.isdir(path):
+                if os.path.isdir(resolved_path):
                     responses.append(
                         FileDownloadResponse(
                             path=path, content=None, error="is_directory"
                         )
                     )
                     continue
-                with open(path, "rb") as f:
+                with open(resolved_path, "rb") as f:
                     content = f.read()
                 responses.append(
                     FileDownloadResponse(path=path, content=content, error=None)

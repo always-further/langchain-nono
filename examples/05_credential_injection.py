@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """API key protection via proxy credential injection.
 
-The proxy can load a real credential from the host OS keyring and inject it
+The proxy can load a real credential from the host environment and inject it
 into outbound requests. The sandboxed child receives a route-scoped phantom
-token, not the real host credential.
+token, not the real host credential value.
 
 This example uses a local HTTP upstream so it does not need OpenSSL, a public
-network service, requests, or the OpenAI SDK. To see a successful injected
-Authorization header, store a real value in the host OS keyring under the
-account name "openai-key"; without that entry, the proxy fails closed before
-forwarding the request.
+network service, requests, or the OpenAI SDK. It sets a demo host environment
+variable so the proxy can resolve credential_key="env://OPENAI_API_KEY".
 """
 
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -68,6 +68,8 @@ def child_env_state(sandbox: NonoSandbox, name: str) -> str:
 
 def main() -> None:
     """Show credential injection without exposing a host API key env var."""
+    os.environ["OPENAI_API_KEY"] = "demo-real-secret"
+
     with tempfile.TemporaryDirectory(prefix="langchain-nono-") as workspace:
         upstream = HeaderCaptureServer(("127.0.0.1", 0))
         upstream_thread = threading.Thread(
@@ -80,7 +82,7 @@ def main() -> None:
         route = RouteConfig(
             prefix="/openai",
             upstream=f"http://127.0.0.1:{upstream.server_port}",
-            credential_key="openai-key",
+            credential_key="env://OPENAI_API_KEY",
             inject_mode=InjectMode.HEADER,
             inject_header="Authorization",
             credential_format="Bearer {}",
@@ -105,11 +107,18 @@ def main() -> None:
             print(f"   OPENAI_BASE_URL: {base_url}\n")
 
             print("3. Calling the local upstream through the proxy")
-            result = sandbox.execute(
-                "curl -sS "
-                '-H "Authorization: Bearer ${OPENAI_API_KEY}" '
-                '"${OPENAI_BASE_URL}/inspect" 2>&1 || true'
-            )
+            request_script = """
+import os
+import urllib.request
+
+request = urllib.request.Request(
+    os.environ["OPENAI_BASE_URL"] + "/inspect",
+    headers={"Authorization": "Bearer " + os.environ["OPENAI_API_KEY"]},
+)
+with urllib.request.urlopen(request, timeout=30) as response:
+    print(response.read().decode())
+"""
+            result = sandbox.execute(f"python3 -c {shlex.quote(request_script)}")
             print(f"   exit_code: {result.exit_code}")
             print(f"   response: {result.output.strip()}\n")
 
@@ -117,7 +126,7 @@ def main() -> None:
             if upstream.last_authorization is None:
                 print("   Authorization header: absent")
                 print(
-                    "   Result: no keyring credential was available, so the proxy failed closed"
+                    "   Result: no host env credential was available, so the proxy failed closed"
                 )
             else:
                 print("   Authorization header: present")
