@@ -1,5 +1,5 @@
 <div align="center">
-<img src="https://raw.githubusercontent.com/always-further/langchain-nono/main/assets/logo.png" alt="nono logo" width="500"/>
+<img src="https://raw.githubusercontent.com/nolabs-ai/langchain-nono/main/assets/logo.png" alt="nono logo" width="500"/>
 
 
 OS-enforced sandbox backend for [LangChain Deep Agents](https://github.com/langchain-ai/deepagents) using [nono](https://github.com/always-further/nono).

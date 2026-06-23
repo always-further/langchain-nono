@@ -32,9 +32,9 @@ dependencies = [
 packages = ["langchain_nono"]
 
 [project.urls]
-Homepage = "https://github.com/always-further/langchain-nono"
-Repository = "https://github.com/always-further/langchain-nono"
-Documentation = "https://github.com/always-further/langchain-nono"
+Homepage = "https://github.com/nolabs-ai/langchain-nono"
+Repository = "https://github.com/nolabs-ai/langchain-nono"
+Documentation = "https://github.com/nolabs-ai/langchain-nono"
 
 [dependency-groups]
 dev = [
