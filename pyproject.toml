@@ -24,7 +24,7 @@ classifiers = [
 version = "0.4.0"
 requires-python = ">=3.11,<4.0"
 dependencies = [
-    "deepagents>=0.6.8,<0.7",
+    "deepagents>=0.6.8,<0.8",
     "nono-py>=0.10.1",
 ]
 
